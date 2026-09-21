@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# xiaoai-profile — Lenovo XiaoXinAir 14 平台 profile 切换
+# 用法: xiaoai-profile [status|performance|balanced|low-power]
+
+set -euo pipefail
+
+PROFILE_FILE="/sys/firmware/acpi/platform_profile"
+MODES=("low-power" "balanced" "performance")
+MODE_LABELS=("🔋 节能/安静" "⚖️ 均衡/智能散热" "🚀 野兽/性能")
+
+if [[ ! -f "$PROFILE_FILE" ]]; then
+    notify-send -a "XiaoXinAir" "性能模式" "错误: platform_profile 不支持" 2>/dev/null || true
+    exit 1
+fi
+
+current_mode=$(cat "$PROFILE_FILE" 2>/dev/null | tr -d '\n')
+current_idx=-1
+for i in "${!MODES[@]}"; do
+    [[ "${MODES[$i]}" == "$current_mode" ]] && current_idx=$i && break
+done
+[[ $current_idx -eq -1 ]] && current_idx=1
+
+if [[ $# -eq 0 ]]; then
+    next_idx=$(( (current_idx + 1) % ${#MODES[@]} ))
+    target="${MODES[$next_idx]}"
+    target_idx=$next_idx
+elif [[ "$1" == "status" ]]; then
+    echo "${MODE_LABELS[$current_idx]} ($current_mode)"
+    notify-send -a "XiaoXinAir" "当前模式" "${MODE_LABELS[$current_idx]}" 2>/dev/null || true
+    exit 0
+else
+    target="$1"
+    new_idx=-1
+    for i in "${!MODES[@]}"; do
+        [[ "${MODES[$i]}" == "$target" ]] && new_idx=$i && break
+    done
+    if [[ $new_idx -eq -1 ]]; then
+        echo "错误: 未知模式 '$target'" >&2
+        exit 1
+    fi
+    target_idx=$new_idx
+fi
+
+if ! echo "$target" | sudo tee "$PROFILE_FILE" >/dev/null; then
+    notify-send -a "XiaoXinAir" "性能模式" "切换失败: 权限不足" 2>/dev/null || true
+    exit 1
+fi
+
+notify-send -a "XiaoXinAir" \
+    -u normal \
+    -h "int:value:${target_idx}0" \
+    "性能模式已切换" \
+    "${MODE_LABELS[$target_idx]}" 2>/dev/null || true
+
+echo "${MODE_LABELS[$target_idx]} ($target)"

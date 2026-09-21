@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+"""xiaoai-battery — 联想小新 Air 14 电池/性能管理工具"""
+
+import tkinter as tk
+from tkinter import ttk
+import subprocess
+import sys
+
+# ── 系统路径 ──────────────────────────────────────────────
+SYS_PROFILE = "/sys/firmware/acpi/platform_profile"
+SYS_CONSERVATION = "/sys/bus/platform/devices/VPC2004:00/conservation_mode"
+SYS_EPP = "/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference"
+SYS_GPU_DPM = "/sys/class/drm/card0/device/power_dpm_force_performance_level"
+BAT_PATH = "/org/freedesktop/UPower/devices/battery_BAT1"
+THERMAL_ZONE = "/sys/class/thermal/thermal_zone0/temp"
+
+# ── 三模式配置 ────────────────────────────────────────────
+MODES = [
+    ("野兽", "performance", "performance", "high",   "🚀 CPU/GPU 全速，风扇激进"),
+    ("均衡", "balanced",    "default",    "auto",    "⚖️ 智能调度，平衡功耗与性能"),
+    ("安静", "low-power",   "power",      "auto",    "🔋 低功耗，风扇安静，适合办公"),
+]
+
+C = {"bg": "#1a1a2e", "fg": "#e0e0ff", "muted": "#8888aa", "active": "#16213e", "ok": "#4ade80", "err": "#f87171"}
+
+
+def read_sysfs(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def write_sysfs(path, value):
+    subprocess.run(["sudo", "tee", path], input=value + "\n",
+                   text=True, capture_output=True)
+
+
+def notify(msg, kind="ok"):
+    """顶部弹出提示"""
+    label = tk.Label(
+        root, text=msg, font=("Microsoft YaHei", 11, "bold"),
+        fg=C["ok"] if kind == "ok" else C["err"],
+        bg="#0f0f23", relief="flat",
+    )
+    label.place(relx=0.5, y=6, anchor="n")
+    label.after(2000, label.destroy)
+
+
+def get_battery():
+    try:
+        r = subprocess.run(["upower", "-i", BAT_PATH],
+                           capture_output=True, text=True, timeout=5)
+        data = {}
+        for line in r.stdout.splitlines():
+            if ":" in line:
+                key, _, val = line.partition(":")
+                data[key.strip()] = val.strip()
+        return data
+    except Exception:
+        return {}
+
+
+def get_temp():
+    v = read_sysfs(THERMAL_ZONE)
+    try:
+        return f"{int(v) / 1000:.1f}°C"
+    except Exception:
+        return "--"
+
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("XiaoXinAir 电源管理")
+        self.resizable(False, False)
+        self.configure(bg=C["bg"])
+        self._refresh_timer = None
+        self._mode_var = tk.StringVar(value=read_sysfs(SYS_PROFILE))
+        self._build_ui()
+        self._refresh()
+        self.after(3000, self._loop_refresh)
+
+    def _build_ui(self):
+        # 标题
+        tk.Label(
+            self, text="🔌 XiaoXinAir 电源管理",
+            font=("Microsoft YaHei", 16, "bold"),
+            fg=C["fg"], bg=C["bg"],
+        ).pack(pady=(18, 10))
+
+        # ── 模式选择 ──
+        mode_frame = tk.LabelFrame(
+            self, text="性能模式", font=("Microsoft YaHei", 11),
+            fg=C["fg"], bg=C["bg"],
+            padx=10, pady=8, relief="flat",
+        )
+        mode_frame.pack(fill="x", padx=16, pady=(0, 8))
+
+        for name, profile, epp, gpu, desc in MODES:
+            btn = tk.Radiobutton(
+                mode_frame,
+                text=f"  {name}",
+                variable=self._mode_var,
+                value=profile,
+                font=("Microsoft YaHei", 11),
+                fg=C["fg"],
+                bg=C["bg"],
+                activebackground=C["active"],
+                activeforeground="#ffffff",
+                selectcolor=C["active"],
+                anchor="w",
+                command=self._apply_mode,
+            )
+            btn.pack(fill="x", padx=8, pady=3)
+
+        self._mode_desc = tk.Label(
+            mode_frame, text="",
+            font=("Microsoft YaHei", 9),
+            fg=C["muted"], bg=C["bg"],
+        )
+        self._mode_desc.pack(anchor="w", padx=16, pady=(2, 0))
+        self._update_desc()
+
+        # ── 保养开关 ──
+        care_frame = tk.LabelFrame(
+            self, text="电池保养", font=("Microsoft YaHei", 11),
+            fg=C["fg"], bg=C["bg"],
+            padx=10, pady=8, relief="flat",
+        )
+        care_frame.pack(fill="x", padx=16, pady=(0, 8))
+
+        self._conserv_var = tk.BooleanVar(
+            value=(read_sysfs(SYS_CONSERVATION) == "1")
+        )
+        ck = tk.Checkbutton(
+            care_frame,
+            text=" Conservation Mode（限制充电上限约 80%，延长电池寿命）",
+            variable=self._conserv_var,
+            font=("Microsoft YaHei", 10),
+            fg=C["fg"],
+            bg=C["bg"],
+            activebackground=C["active"],
+            activeforeground="#ffffff",
+            selectcolor=C["active"],
+            anchor="w",
+            command=self._toggle_conserv,
+        )
+        ck.pack(anchor="w", padx=8)
+
+        # ── 状态面板 ──
+        status_frame = tk.LabelFrame(
+            self, text="实时状态", font=("Microsoft YaHei", 11),
+            fg=C["fg"], bg=C["bg"],
+            padx=10, pady=8, relief="flat",
+        )
+        status_frame.pack(fill="x", padx=16, pady=(0, 10))
+
+        self._vars = {}
+        for label, key in [
+            ("电量", "pct"), ("状态", "state"),
+            ("温度", "temp"), ("CPU 频率", "cpu"),
+            ("GPU 状态", "gpu"),
+        ]:
+            row = tk.Frame(status_frame, bg=C["bg"])
+            row.pack(fill="x", pady=2)
+            tk.Label(
+                row, text=label, font=("Microsoft YaHei", 10),
+                fg=C["muted"], bg=C["bg"],
+                width=8, anchor="w",
+            ).pack(side="left")
+            sv = tk.StringVar(value="...")
+            self._vars[key] = sv
+            tk.Label(
+                row, textvariable=sv, font=("Microsoft YaHei", 10, "bold"),
+                fg=C["fg"], bg=C["bg"], anchor="w",
+            ).pack(side="left", padx=8)
+
+        tk.Label(
+            self, text="每 3 秒自动刷新",
+            font=("Microsoft YaHei", 9),
+            fg="#444466", bg=C["bg"],
+        ).pack(pady=(4, 10))
+
+    def _apply_mode(self):
+        profile = self._mode_var.get()
+        cfg = next((m for m in MODES if m[1] == profile), None)
+        if not cfg:
+            return
+        _, profile, epp, gpu, _ = cfg
+        write_sysfs(SYS_PROFILE, profile)
+        write_sysfs(SYS_EPP, epp)
+        write_sysfs(SYS_GPU_DPM, gpu)
+        self._update_desc()
+        self._refresh()
+        name = next(m[0] for m in MODES if m[1] == profile)
+        notify(f"✅ 已切换到「{name}」模式")
+
+    def _toggle_conserv(self):
+        val = "1" if self._conserv_var.get() else "0"
+        write_sysfs(SYS_CONSERVATION, val)
+        state = "已开启" if val == "1" else "已关闭"
+        notify(f"✅ Conservation Mode {state}")
+
+    def _update_desc(self):
+        profile = self._mode_var.get()
+        cfg = next((m for m in MODES if m[1] == profile), None)
+        if cfg:
+            self._mode_desc.config(text=cfg[4])
+
+    def _refresh(self):
+        try:
+            bat = get_battery()
+            # percentage 字段本身就含 %，直接取
+            self._vars["pct"].set(bat.get("percentage", "--"))
+            state_map = {
+                "charging": "🔌 充电中",
+                "discharging": "🔋 使用中",
+                "not-charging": "⚡ 已接通",
+                "fully-charged": "✅ 已满",
+                "pending-charge": "🔋 待充",
+            }
+            self._vars["state"].set(state_map.get(bat.get("state", ""), "--"))
+            self._vars["temp"].set(get_temp())
+
+            epp = read_sysfs(SYS_EPP) or "--"
+            cur = read_sysfs("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_cur_freq")
+            try:
+                freq = f"{int(cur) // 1000000}.{int(cur) % 1000000 // 10000:02d} GHz"
+            except Exception:
+                freq = "--"
+            self._vars["cpu"].set(f"{epp} / {freq}")
+            self._vars["gpu"].set(read_sysfs(SYS_GPU_DPM) or "--")
+
+            # 刷新保养开关状态
+            self._conserv_var.set(read_sysfs(SYS_CONSERVATION) == "1")
+        except Exception:
+            pass
+
+    def _loop_refresh(self):
+        self._refresh()
+        self._refresh_timer = self.after(3000, self._loop_refresh)
+
+    def destroy(self):
+        if self._refresh_timer:
+            self.after_cancel(self._refresh_timer)
+        super().destroy()
+
+
+root = App()
+root.mainloop()
