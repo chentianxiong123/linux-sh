@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# ============================================================
+# 新 Windows 应用启动器模板
+# 用法: cp _new.sh.template myapp.sh && chmod +x myapp.sh
+# ============================================================
+
+set -euo pipefail
+
+# --- 配置区 ---
+APP_NAME="MyApp"                       # 应用名（用于日志/提示）
+EXE='C:\Program Files\MyApp\app.exe'   # Wine 内的 Windows 路径
+WINE_PREFIX="${WINE_PREFIX:-$HOME/.wine}"
+LOG="/tmp/${APP_NAME,,}.log"
+
+# --- 前置检查 ---
+command -v wine &>/dev/null || { echo "❌ 未安装 wine" >&2; exit 1; }
+[ -d "$WINE_PREFIX" ] || { echo "❌ 找不到 wine 前缀: $WINE_PREFIX" >&2; exit 1; }
+
+# --- 检查是否已在运行（避免重复启动）---
+if pgrep -f "wine.*$EXE" &>/dev/null; then
+    echo "ℹ️  ${APP_NAME} 已在运行"
+    exit 0
+fi
+
+# --- 启动 ---
+setsid nohup env "WINEPREFIX=$WINE_PREFIX" wine "$EXE" \
+    > "$LOG" 2>&1 < /dev/null & disown
+
+echo "✅ ${APP_NAME} 已启动 (PID=$!)"
+echo "   日志: $LOG"
