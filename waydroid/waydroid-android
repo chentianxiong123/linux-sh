@@ -1,0 +1,617 @@
+#!/usr/bin/env python3
+"""waydroid-android — 安卓桌面 · 机型切换（X11 嵌套 Weston）
+
+关键机制（实测铁律）：
+  1. waydroid 1.6.3 只支持 Wayland → X11 下用 `weston --shell=kiosk` 窗口承载。
+  2. 安卓真实分辨率由 persist.waydroid.width/height 属性决定（启动时生效），
+     Weston 窗口尺寸必须与之一致；不一致 → hwcomposer 崩溃 → 黑屏。
+  3. 严禁运行时改分辨率/拉伸窗口（一拉就死）。切机型 = 冷重启：
+     写入属性 → 停会话 → 按新尺寸重建 Weston → 重新开机。
+  4. 起机后锁死窗口（WM_NORMAL_HINTS min=max），防止误拉伸。
+"""
+
+import tkinter as tk
+import subprocess
+import os
+import re
+import stat
+
+# ── 路径/常量 ────────────────────────────────────────────
+STATE_FILE = "/home/a1/sh/waydroid/device.conf"      # 当前生效机型
+WESTON_LOG = "/tmp/waydroid-weston.log"
+ANDROID_IP = "192.168.240.112"
+RUNTIME = "/run/user/%d" % os.getuid()
+
+# 机型预设：显示名, 宽, 高
+DEVICES = [
+    ("📱 手机",  540, 960),
+    ("📲 平板",  1280, 800),
+    ("🖥️ 电脑", 1600, 900),   # 16:9，留出桌面面板
+    ("⌚ 手表",  320, 320),
+]
+VM_DESC = {
+    "📱 手机": "竖屏 540×960，日常手机使用",
+    "📲 平板": "横屏 1280×800，平板风格",
+    "🖥️ 电脑": "横屏 1600×900，接近桌面",
+    "⌚ 手表": "方屏 320×320，手表风格",
+}
+
+# ── 深色主题（同 xiaoai-battery）────────────────────────
+C = {"bg": "#1a1a2e", "fg": "#e0e0ff", "muted": "#8888aa",
+     "active": "#16213e", "ok": "#4ade80", "err": "#f87171"}
+FONT = "Microsoft YaHei"
+
+
+def run(cmd, timeout=10):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return None
+
+
+def get_status():
+    """(session, container)"""
+    r = run(["waydroid", "status"], timeout=8)
+    if not r:
+        return ("--", "--")
+    def grab(label):
+        m = re.search(r"%s:\s*(.+)" % label, r.stdout or "")
+        return m.group(1).strip() if m else "--"
+    return grab("Session"), grab("Container")
+
+
+def weston_pid():
+    r = run(["pgrep", "-x", "weston"], timeout=5)
+    return r.stdout.strip() if r and r.stdout.strip() else ""
+
+
+def kill_weston():
+    """按精确进程名停 Weston（不能 pkill -f，会误杀自身 shell）"""
+    pid = weston_pid()
+    if pid:
+        os.kill(int(pid), 15)
+
+
+def get_socket():
+    """取最新的 Wayland socket 名（只认真 socket，排除 .lock）"""
+    if not os.path.isdir(RUNTIME):
+        return None
+    best = None
+    for name in os.listdir(RUNTIME):
+        if not name.startswith("wayland-") or name.endswith(".lock"):
+            continue
+        path = os.path.join(RUNTIME, name)
+        try:
+            if not stat.S_ISSOCK(os.stat(path).st_mode):
+                continue
+        except OSError:
+            continue
+        m = re.search(r"wayland-(\d+)$", name)
+        if m and (best is None or int(m.group(1)) > int(best[1])):
+            best = (name, m.group(1))
+    return best[0] if best else None
+
+
+def boot_completed():
+    r = run(["sudo", "lxc-attach", "-n", "waydroid",
+             "-P", "/var/lib/waydroid/lxc", "--", "getprop", "sys.boot_completed"],
+            timeout=8)
+    return bool(r and "1" in (r.stdout or ""))
+
+
+def set_props(w, h):
+    """写入机型属性（需要会话运行中，persist 永久生效）"""
+    ok = True
+    for p, v in (("width", w), ("height", h)):
+        r = run(["waydroid", "prop", "set", "persist.waydroid." + p, str(v)], timeout=15)
+        if not r or r.returncode != 0:
+            ok = False
+    # 验证
+    rw = run(["waydroid", "prop", "get", "persist.waydroid.width"], timeout=10)
+    rh = run(["waydroid", "prop", "get", "persist.waydroid.height"], timeout=10)
+    if not (rw and rh and str(w) in (rw.stdout or "") and str(h) in (rh.stdout or "")):
+        return False
+    return ok
+
+
+# ── 离线直写属性文件（容器停止时可用，最可靠） ────────────
+# 文件：/home/a1/.local/share/waydroid/data/property/persistent_properties
+# 格式：AOSP PersistentProperties protobuf（外层 repeated field1=记录；
+#       记录内 field1=属性名, field2=属性值）。安卓每次开机都读它，
+#       HAL 启动时据此决定分辨率。容器停止时改它 = 下次开机即生效。
+PERSIST_FILE = "/home/a1/.local/share/waydroid/data/property/persistent_properties"
+
+
+def _vi(n):
+    """protobuf varint 编码"""
+    out = bytearray()
+    while True:
+        b = n & 0x7f
+        n >>= 7
+        if n:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            return bytes(out)
+
+
+def parse_persist(data):
+    """解析属性文件 → [(name, value), ...]；格式不对返回 None"""
+    recs = []
+    i = 0
+    try:
+        while i < len(data):
+            assert data[i] == 0x0a
+            i += 1
+            ln = 0
+            shift = 0
+            while True:
+                b = data[i]
+                i += 1
+                ln |= (b & 0x7f) << shift
+                shift += 7
+                if not (b & 0x80):
+                    break
+            end = i + ln
+            rec = {}
+            while i < end:
+                t = data[i]
+                i += 1
+                fld = t >> 3
+                ln2 = 0
+                shift = 0
+                while True:
+                    b = data[i]
+                    i += 1
+                    ln2 |= (b & 0x7f) << shift
+                    shift += 7
+                    if not (b & 0x80):
+                        break
+                rec[fld] = data[i:i + ln2].decode("utf-8")
+                i += ln2
+            recs.append((rec.get(1, ""), rec.get(2, "")))
+        return recs
+    except Exception:
+        return None
+
+
+def serialize_persist(recs):
+    """[(name, value)] → 属性文件字节"""
+    out = bytearray()
+    for name, value in recs:
+        rec = (b"\x0a" + _vi(len(name)) + name.encode("utf-8")
+               + b"\x12" + _vi(len(value)) + value.encode("utf-8"))
+        out += b"\x0a" + _vi(len(rec)) + rec
+    return bytes(out)
+
+
+def read_real_props():
+    """从属性文件读真实 (width, height)，不依赖会话；失败返回 None"""
+    r = run(["sudo", "cat", PERSIST_FILE], timeout=8)
+    if not r or not r.stdout:
+        return None
+    recs = parse_persist(r.stdout.encode())
+    if not recs:
+        return None
+    w = h = None
+    for name, value in recs:
+        if name == "persist.waydroid.width":
+            w = value
+        elif name == "persist.waydroid.height":
+            h = value
+    if w and h and w.isdigit() and h.isdigit():
+        return (int(w), int(h))
+    return None
+
+
+def set_props_offline(w, h):
+    """容器停止时直写属性文件。
+    返回 True=成功；False=失败；None=容器其实还在运行（应改走会话内写入）"""
+    sess, _ = get_status()
+    if sess == "RUNNING":
+        return None
+    r = run(["sudo", "cat", PERSIST_FILE], timeout=8)
+    if not r or not r.stdout:
+        return False
+    recs = parse_persist(r.stdout.encode())
+    if recs is None:
+        return False
+    out = []
+    changed = False
+    for name, value in recs:
+        if name == "persist.waydroid.width":
+            value = str(w)
+            changed = True
+        elif name == "persist.waydroid.height":
+            value = str(h)
+            changed = True
+        out.append((name, value))
+    if not changed:
+        out.append(("persist.waydroid.width", str(w)))
+        out.append(("persist.waydroid.height", str(h)))
+    try:
+        p = subprocess.Popen(["sudo", "tee", PERSIST_FILE],
+                             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        p.communicate(serialize_persist(out), timeout=8)
+    except Exception:
+        return False
+    # 读回验证
+    cur = read_real_props()
+    return cur == (w, h)
+
+
+def start_weston(w, h):
+    kill_weston()
+    for f in os.listdir(RUNTIME):
+        if f.startswith("wayland-"):
+            try:
+                os.remove(os.path.join(RUNTIME, f))
+            except OSError:
+                pass
+    subprocess.Popen(["setsid", "weston", "--width=%d" % w, "--height=%d" % h,
+                      "--shell=kiosk"],
+                     stdout=open(WESTON_LOG, "w"), stderr=subprocess.STDOUT,
+                     stdin=subprocess.DEVNULL)
+
+
+def start_session(sock):
+    subprocess.Popen(["waydroid", "session", "start"],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     env=dict(os.environ, WAYLAND_DISPLAY=sock))
+
+
+def show_full_ui(sock):
+    subprocess.Popen(["waydroid", "show-full-ui"],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     env=dict(os.environ, WAYLAND_DISPLAY=sock))
+
+
+def lock_window(w, h):
+    """锁死窗口尺寸：min=max，防止运行中拉伸导致黑屏"""
+    r = run(["xdotool", "search", "--class", "weston"], timeout=5)
+    if not r or not r.stdout.strip():
+        return False
+    wid = r.stdout.strip().splitlines()[0]
+    hints = "48,0,0,0,0,{w},{h},{w},{h},0,0,0,0,0,0,0,0,0,0,0".format(w=w, h=h)
+    rr = run(["xprop", "-id", wid, "-f", "WM_NORMAL_HINTS", "32c",
+              "-set", "WM_NORMAL_HINTS", hints], timeout=5)
+    return bool(rr and rr.returncode == 0)
+
+
+def adb_res():
+    """读安卓当前 Physical size（仅会话运行时调用）"""
+    r = run(["adb", "-s", ANDROID_IP, "shell", "wm", "size"], timeout=8)
+    if not r or not r.stdout:
+        return "--"
+    for line in (r.stdout or "").splitlines():
+        if "Physical size" in line:
+            return line.split(":", 1)[1].strip()
+    return "--"
+
+
+def adb_online():
+    r = run(["adb", "devices"], timeout=5)
+    return bool(r and any(ANDROID_IP in l for l in (r.stdout or "").splitlines()))
+
+
+def read_state():
+    try:
+        with open(STATE_FILE) as f:
+            name, w, h = f.read().split()
+        return name, int(w), int(h)
+    except Exception:
+        return DEVICES[0][0], DEVICES[0][1], DEVICES[0][2]
+
+
+def write_state(name, w, h):
+    try:
+        os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+        with open(STATE_FILE, "w") as f:
+            f.write("%s %d %d\n" % (name, w, h))
+    except Exception:
+        pass
+
+
+root = None
+
+
+def notify(msg, kind="ok"):
+    """顶部提示，2.2 秒消失"""
+    lbl = tk.Label(root, text=msg, font=(FONT, 11, "bold"),
+                   fg=C["ok"] if kind == "ok" else C["err"],
+                   bg=C["active"], relief="flat")
+    lbl.place(relx=0.5, y=6, anchor="n")
+    lbl.after(2200, lbl.destroy)
+
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("安卓桌面")
+        self.resizable(False, False)
+        self.configure(bg=C["bg"])
+        self._timer = None
+        self._busy = False
+        self._sock = None
+        self._session = "--"
+        real = read_real_props()
+        if real:
+            # 以真实属性为准；恰好等于某个预设则用其名，否则标为自定义
+            hit = next((d[0] for d in DEVICES if (d[1], d[2]) == real), "📺 自定义")
+            self._active = (hit, real[0], real[1])
+        else:
+            self._active = read_state()          # (name, w, h) 回退用状态文件
+        self._size_var = tk.StringVar(value=self._active[0])
+        self._build_ui()
+        self._refresh()
+        self.after(3000, self._loop)
+
+    # ── UI ────────────────────────────────────────────────
+    def _build_ui(self):
+        tk.Label(self, text="🤖 安卓桌面",
+                 font=(FONT, 16, "bold"), fg=C["fg"], bg=C["bg"],
+                 ).pack(pady=(18, 10))
+
+        # 机型选择
+        dev = tk.LabelFrame(self, text="机型", font=(FONT, 11),
+                            fg=C["fg"], bg=C["bg"], padx=10, pady=8, relief="flat")
+        dev.pack(fill="x", padx=16, pady=(0, 8))
+        for name, w, h in DEVICES:
+            tk.Radiobutton(dev, text="  %s  %d×%d" % (name, w, h),
+                           variable=self._size_var, value=name,
+                           font=(FONT, 11), fg=C["fg"], bg=C["bg"],
+                           activebackground=C["active"], activeforeground="#ffffff",
+                           selectcolor=C["active"], anchor="w",
+                           command=self._update_desc,
+                           ).pack(fill="x", padx=8, pady=2)
+        self._dev_desc = tk.Label(dev, text="", font=(FONT, 9),
+                                  fg=C["muted"], bg=C["bg"])
+        self._dev_desc.pack(anchor="w", padx=16, pady=(2, 0))
+        self._update_desc()
+
+        # 运行状态
+        status = tk.LabelFrame(self, text="运行状态", font=(FONT, 11),
+                               fg=C["fg"], bg=C["bg"], padx=10, pady=8, relief="flat")
+        status.pack(fill="x", padx=16, pady=(0, 8))
+        self._dot = tk.Label(status, text="●", font=(FONT, 26),
+                             fg=C["muted"], bg=C["bg"])
+        self._dot.pack(side="left", padx=(4, 10))
+        self._state_lbl = tk.Label(status, text="检测中...",
+                                   font=(FONT, 13, "bold"), fg=C["fg"], bg=C["bg"])
+        self._state_lbl.pack(side="left")
+
+        # 控制
+        ctrl = tk.LabelFrame(self, text="控制", font=(FONT, 11),
+                             fg=C["fg"], bg=C["bg"], padx=10, pady=8, relief="flat")
+        ctrl.pack(fill="x", padx=16, pady=(0, 8))
+        self._btn = tk.Button(ctrl, text="▶ 启动安卓", font=(FONT, 12, "bold"),
+                              fg="#ffffff", bg="#2563eb", activebackground="#1d4ed8",
+                              activeforeground="#ffffff", relief="flat",
+                              cursor="hand2", command=self._toggle)
+        self._btn.pack(fill="x", pady=2)
+        self._note = tk.Label(ctrl, text="", font=(FONT, 9),
+                              fg=C["muted"], bg=C["bg"])
+        self._note.pack(anchor="w", padx=8)
+
+        # 详细信息
+        info = tk.LabelFrame(self, text="详细信息", font=(FONT, 11),
+                             fg=C["fg"], bg=C["bg"], padx=10, pady=8, relief="flat")
+        info.pack(fill="x", padx=16, pady=(0, 10))
+        self._vars = {}
+        for label, key in [("会话", "session"), ("容器", "container"),
+                           ("当前机型", "device"), ("安卓分辨率", "res"),
+                           ("Weston", "weston"), ("ADB", "adb")]:
+            row = tk.Frame(info, bg=C["bg"])
+            row.pack(fill="x", pady=2)
+            tk.Label(row, text=label, font=(FONT, 10), fg=C["muted"],
+                     bg=C["bg"], width=10, anchor="w").pack(side="left")
+            sv = tk.StringVar(value="...")
+            self._vars[key] = sv
+            tk.Label(row, textvariable=sv, font=(FONT, 10, "bold"),
+                     fg=C["fg"], bg=C["bg"], anchor="w").pack(side="left", padx=8)
+
+        tk.Label(self, text="每 3 秒自动刷新 · 切换机型 = 自动冷重启",
+                 font=(FONT, 9), fg="#444466", bg=C["bg"]).pack(pady=(4, 10))
+
+    def _update_desc(self):
+        self._dev_desc.config(text=VM_DESC.get(self._size_var.get(), ""))
+
+    # ── 控制逻辑 ──────────────────────────────────────────
+    def _toggle(self):
+        if self._busy:
+            return
+        if self._session == "RUNNING":
+            name = self._size_var.get()
+            if name != self._active[0]:
+                self._switch_running()          # 运行中切换：写属性 → 重启
+            else:
+                self._stop()
+        else:
+            self._start()
+
+    def _start(self):
+        self._busy = True
+        self._set_ui_busy("启动中...")
+        name = self._size_var.get()
+        dev = next(d for d in DEVICES if d[0] == name)
+        if self._active[0] != name:
+            if self._session == "RUNNING":
+                self._note.config(text="① 写入新机型属性...")
+                self.after(50, lambda: self._switch_running())
+            else:
+                # 已停止 + 换机型：直接重写属性文件（离线，最可靠），
+                # 无需起会话，然后按目标尺寸冷启动
+                self._note.config(text="① 直写属性文件...")
+                self.after(50, lambda: self._offline_set_props(dev))
+        else:
+            self._launch(dev)
+
+    def _switch_running(self):
+        """运行中切换机型：属性可直接写，然后重建 Weston 冷重启"""
+        self._busy = True
+        self._set_ui_busy("切换中...")
+        target = self._target_dev()
+        self._note.config(text="① 写入新机型属性...")
+        self.after(50, lambda: self._set_props_then_restart(target))
+
+    # ── 停止中切换：直写属性文件（离线），再冷启动 ──────────
+    def _offline_set_props(self, dev):
+        if not self._busy:
+            return
+        self._note.config(text="① 直写属性文件 → %d×%d..." % (dev[1], dev[2]))
+        ok = set_props_offline(dev[1], dev[2])
+        if ok is None:
+            # 期间容器其实是运行的，改走会话内写入
+            self._note.config(text="① 写入新机型属性...")
+            self.after(50, lambda: self._set_props_then_restart(dev))
+            return
+        if not ok:
+            self._fail("❌ 属性写入失败（容器可能未完全停止）")
+            return
+        self._note.config(text="② 属性已写入，冷启动 %d×%d..." % (dev[1], dev[2]))
+        self.after(100, lambda: self._launch(dev))
+
+    # ── 运行中切换：写属性后重建 Weston 冷重启 ─────────────
+    def _set_props_then_restart(self, target):
+        if not set_props(target[1], target[2]):
+            self._fail("❌ 属性写入失败")
+            return
+        self._note.config(text="② 属性已写入，重启 Android...")
+        run(["adb", "disconnect", ANDROID_IP], timeout=8)
+        run(["waydroid", "session", "stop"], timeout=25)
+        self.after(1500, lambda: self._launch(target))
+
+    def _target_dev(self):
+        name = self._size_var.get()
+        return next(d for d in DEVICES if d[0] == name)
+
+    def _launch(self, dev):
+        self._note.config(text="② 启动 Weston %d×%d..." % (dev[1], dev[2]))
+        start_weston(dev[1], dev[2])
+        self.after(700, lambda: self._wait_socket(dev, 0))
+
+    def _wait_socket(self, dev, tries):
+        if not self._busy:
+            return
+        self._sock = get_socket()
+        if not self._sock:
+            if tries > 15:
+                self._fail("❌ Weston 未就绪")
+                return
+            self._note.config(text="② 等待 Wayland socket...")
+            self.after(400, lambda: self._wait_socket(dev, tries + 1))
+            return
+        self._note.config(text="③ 启动会话 (%s)..." % self._sock)
+        start_session(self._sock)
+        self.after(1000, lambda: self._wait_running(dev, 0))
+
+    def _wait_running(self, dev, tries):
+        if not self._busy:
+            return
+        sess, _ = get_status()
+        if sess == "RUNNING":
+            self._note.config(text="④ 等待开机完成...")
+            self.after(500, lambda: self._wait_boot(dev, 0))
+        elif tries > 90:
+            run(["waydroid", "session", "stop"], timeout=25)
+            kill_weston()
+            self._fail("❌ 会话启动失败")
+        else:
+            self.after(400, lambda: self._wait_running(dev, tries + 1))
+
+    def _wait_boot(self, dev, tries):
+        if not self._busy:
+            return
+        if boot_completed():
+            self._note.config(text="⑤ 锁窗口 + 拉起界面...")
+            self.after(100, lambda: self._finish_launch(dev))
+        elif tries > 90:
+            run(["waydroid", "session", "stop"], timeout=25)
+            kill_weston()
+            self._fail("❌ 开机超时")
+        else:
+            self.after(700, lambda: self._wait_boot(dev, tries + 1))
+
+    def _finish_launch(self, dev):
+        lock_window(dev[1], dev[2])          # 防拉伸，防黑屏
+        if self._sock:
+            show_full_ui(self._sock)
+        write_state(dev[0], dev[1], dev[2])
+        self._active = (dev[0], dev[1], dev[2])
+        self._busy = False
+        self._set_ui_idle()
+        self._note.config(text="✅ 已启动「%s」%d×%d" % (dev[0], dev[1], dev[2]))
+        notify("✅ 安卓已启动（%s）" % dev[0], "ok")
+        self._refresh()
+
+    def _stop(self):
+        self._busy = True
+        self._set_ui_busy("关闭中...")
+        self._note.config(text="① 停止会话...")
+        run(["adb", "disconnect", ANDROID_IP], timeout=8)
+        run(["waydroid", "session", "stop"], timeout=25)
+        self.after(1500, self._stop2)
+
+    def _stop2(self):
+        kill_weston()
+        self._busy = False
+        self._set_ui_idle()
+        self._note.config(text="✅ 已关闭")
+        notify("✅ 安卓已关闭", "ok")
+        self._refresh()
+
+    def _fail(self, msg):
+        self._busy = False
+        self._set_ui_idle()
+        self._note.config(text=msg)
+        notify(msg, "err")
+        self._refresh()
+
+    def _set_ui_busy(self, text):
+        self._btn.config(state="disabled", text=text)
+
+    def _set_ui_idle(self):
+        self._btn.config(state="normal",
+                         text="■ 关闭安卓" if self._session == "RUNNING" else "▶ 启动安卓")
+
+    # ── 刷新 ──────────────────────────────────────────────
+    def _refresh(self):
+        try:
+            sess, cont = get_status()
+            self._session = sess
+            self._vars["session"].set(sess)
+            self._vars["container"].set(cont)
+            self._vars["device"].set("%s %d×%d" % self._active)
+
+            pid = weston_pid()
+            self._vars["weston"].set("运行中" if pid else "未运行")
+            self._vars["adb"].set("已连接" if adb_online() else "未连接")
+            self._vars["res"].set(adb_res() if sess == "RUNNING" else "未运行")
+
+            running = sess == "RUNNING"
+            self._dot.config(fg=C["ok"] if running else C["err"])
+            self._state_lbl.config(text="运行中" if running else "已停止",
+                                   fg=C["ok"] if running else C["muted"])
+            if not self._busy:
+                name = self._size_var.get()
+                if running and name != self._active[0]:
+                    self._btn.config(text="⟳ 切换机型并重启")
+                else:
+                    self._btn.config(text="■ 关闭安卓" if running else "▶ 启动安卓")
+        except Exception:
+            pass
+
+    def _loop(self):
+        self._refresh()
+        self._timer = self.after(3000, self._loop)
+
+    def destroy(self):
+        if self._timer:
+            self.after_cancel(self._timer)
+        super().destroy()
+
+
+if __name__ == "__main__":
+    root = App()
+    root.mainloop()
