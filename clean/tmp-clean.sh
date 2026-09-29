@@ -48,3 +48,5 @@ echo ""
 remain_k=$(du -sk /tmp 2>/dev/null | awk '{print $1}')
 echo "  剩余:     ${remain_k} KB (root 所有的系统文件,无法清)"
 echo ""
+
+notify-send "/tmp 清理" "释放 $((total_freed/1024)) MB ($total_files 文件 + $total_dirs 目录)" -i edit-delete
