@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""xiaoai-battery — 联想小新 Air 14 电池/性能管理工具"""
+"""battery.sh — 联想小新 Air 14 电池/性能管理工具"""
 
 import tkinter as tk
 from tkinter import ttk

@@ -10,7 +10,7 @@
 ~/sh/
 ├── clicker/         连点器全套（程序+启动器+快捷键助手）
 ├── dev-tools/       开发/维护小工具
-├── xiaoai/          小新 Air 14 平台工具（电源 GUI + 性能模式）
+├── battery/         联想小新 Air 14 电源/性能管理（GUI）
 ├── docker/          Docker daemon 切换
 ├── nfs/             NFS 挂载切换
 ├── proxy/           代理切换
@@ -26,7 +26,7 @@
 |---|---|
 | `clicker/` | 连点器全套：`clicker.py` 本体、`clicker-launcher.sh` 启动器、`clicker-hotkey.sh` 快捷键助手 |
 | `dev-tools/` | 开发/维护小工具：`new-app.sh.template` 新建应用模板、`extract-icon.sh` 提取图标、`cleanup-agent-repo.sh` 清理仓库 |
-| `xiaoai/` | 小新 Air 14 平台工具：`xiaoai-battery` 电源管理 GUI、`xiaoai-profile` 性能模式切换 |
+| `battery/` | 联想小新 Air 14 电池与性能管理 GUI：`battery.sh` |
 | `docker/` | Docker daemon 切换 |
 | `nfs/` | NFS 挂载切换 |
 | `proxy/` | 代理切换（KDE / shell 两版） |
@@ -39,6 +39,6 @@
 | 桌面快捷方式 | 指向 |
 |---|---|
 | 连点器 | `clicker/clicker-launcher.sh` |
-| XiaoXinAir-电源管理 | `xiaoai/xiaoai-battery` |
+| 电池管理 | `battery/battery.sh` |
 | 安卓桌面 | `waydroid/waydroid-android` |
 | 安卓 (Wayland 直连) | `waydroid/安卓.sh` |
