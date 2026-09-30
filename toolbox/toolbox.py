@@ -202,6 +202,7 @@ class ToolboxApp:
         self._drag_start_x = 0
         self._drag_start_y = 0
         self._drag_ids = []
+        self._drag_photo = None
         self._is_dragging = False
         self._drag_threshold = 5  # 像素阈值，超过才算拖拽
         
@@ -325,9 +326,18 @@ class ToolboxApp:
         canvas.tag_bind(click_tag, "<Button-3>", lambda e, i=item: self.show_menu(e, i))
         canvas.tag_bind(click_tag, "<Enter>", lambda e, t=tag: self.on_hover(t, True))
         canvas.tag_bind(click_tag, "<Leave>", lambda e, t=tag: self.on_hover(t, False))
-        
-        # 保存位置信息用于拖拽检测
-        item['_pos'] = (cx, cy)
+
+    def _cell_center(self, idx):
+        """根据索引计算格子中心坐标"""
+        col = idx % GRID_COLS
+        row = idx // GRID_COLS
+        return PADDING + col * CELL_W + CELL_W // 2, PADDING + row * CELL_H + CELL_H // 2
+
+    def _idx_at(self, x, y):
+        """根据鼠标坐标计算格子索引"""
+        col = (x - PADDING) // CELL_W
+        row = (y - PADDING) // CELL_H
+        return row * GRID_COLS + col
 
     def _on_press(self, event, item, grid_idx):
         """鼠标按下：记录起始位置，准备拖拽"""
@@ -336,9 +346,7 @@ class ToolboxApp:
         self._drag_start_x = event.x
         self._drag_start_y = event.y
         self._is_dragging = False
-        # 清除上次双击检测
-        self._last_click_time = None
-        self._last_click_item = None
+        # 注意：不重置 _last_click_time，让 _on_release 检测双击
 
     def _on_drag(self, event):
         """拖动中：超过阈值则开始拖拽"""
@@ -394,8 +402,9 @@ class ToolboxApp:
             event.x - 40, event.y - 40, event.x + 40, event.y + 40,
             fill="#2a3f6e", outline=C_ACCENT, width=2,
         ))
-        # 图标
+        # 图标（保存引用防止 GC）
         photo = self.make_photo(item)
+        self._drag_photo = photo
         if photo:
             ids.append(self.canvas.create_image(
                 event.x, event.y - 10, image=photo, anchor="center"
@@ -429,64 +438,46 @@ class ToolboxApp:
             for cid in self._drag_ids:
                 self.canvas.delete(cid)
             self._drag_ids = []
+        self._drag_photo = None
 
     def _highlight_drop_target(self, event):
         """高亮鼠标下的目标格子"""
-        if hasattr(self, '_last_target_tag'):
+        if self._last_target_tag:
             self.canvas.itemconfig(self._last_target_tag, fill="", outline="")
+            self._last_target_tag = None
         
-        # 检测鼠标下的格子
-        for idx, item in enumerate(self.items):
-            if '_pos' not in item:
-                continue
-            cx, cy = item['_pos']
-            if abs(event.x - cx) < CELL_W // 2 and abs(event.y - cy) < CELL_H // 2:
-                if item != self._drag_item:
-                    tag = f"cell_{idx}"
-                    self.canvas.itemconfig(tag, fill="#2a4f7e", outline=C_ACCENT)
-                    self._last_target_tag = tag
-                break
+        # 用坐标直接算索引，不用 _pos 缓存
+        dst_idx = self._idx_at(event.x, event.y)
+        src_idx = self.items.index(self._drag_item)
+        total = len(self.items)
+        
+        if 0 <= dst_idx < total and dst_idx != src_idx:
+            tag = f"cell_{dst_idx}"
+            self.canvas.itemconfig(tag, fill="#2a4f7e", outline=C_ACCENT)
+            self._last_target_tag = tag
 
     def _complete_drop(self, event):
-        """完成拖拽：交换两个格子（局部更新，避免闪烁）"""
-        target = None
-        target_idx = None
-        for idx, item in enumerate(self.items):
-            if '_pos' not in item:
-                continue
-            cx, cy = item['_pos']
-            if abs(event.x - cx) < CELL_W // 2 and abs(event.y - cy) < CELL_H // 2:
-                if item != self._drag_item:
-                    target = item
-                    target_idx = idx
-                break
+        """完成拖拽：交换两个格子（局部更新）"""
+        src_idx = self.items.index(self._drag_item)
+        dst_idx = self._idx_at(event.x, event.y)
+        total = len(self.items)
         
-        if target and target_idx is not None:
-            # 交换两个 item 在列表中的位置
-            src_idx = self._drag_grid_idx
-            dst_idx = target_idx
-            self.items[src_idx], self.items[dst_idx] = self.items[dst_idx], self.items[src_idx]
-            
-            # 局部更新：只删除并重绘这两个格子
-            src_tag = f"cell_{src_idx}"
-            dst_tag = f"cell_{dst_idx}"
-            click_src_tag = f"click_{src_idx}"
-            click_dst_tag = f"click_{dst_idx}"
-            
-            # 删除旧的格子元素
-            self.canvas.delete(src_tag, dst_tag, click_src_tag, click_dst_tag)
-            
-            # 重新绘制这两个格子
-            src_item = self.items[src_idx]
-            dst_item = self.items[dst_idx]
-            src_cx, src_cy = src_item['_pos']
-            dst_cx, dst_cy = dst_item['_pos']
-            
-            self.draw_cell(self.canvas, src_item, dst_cx, dst_cy, dst_idx)
-            self.draw_cell(self.canvas, dst_item, src_cx, src_cy, src_idx)
-            
-            # 保存顺序
-            self._save_order()
+        if dst_idx < 0 or dst_idx >= total or dst_idx == src_idx:
+            return
+        
+        # 交换列表
+        self.items[src_idx], self.items[dst_idx] = self.items[dst_idx], self.items[src_idx]
+        
+        # 局部更新：只删除并重绘这两个格子（位置由索引算，不会错）
+        self.canvas.delete(f"cell_{src_idx}", f"click_{src_idx}", f"cell_{dst_idx}", f"click_{dst_idx}")
+        
+        sx, sy = self._cell_center(src_idx)
+        dx, dy = self._cell_center(dst_idx)
+        self.draw_cell(self.canvas, self.items[src_idx], sx, sy, src_idx)
+        self.draw_cell(self.canvas, self.items[dst_idx], dx, dy, dst_idx)
+        
+        # 保存顺序
+        self._save_order()
 
     def _save_order(self):
         """保存图标顺序到文件"""
