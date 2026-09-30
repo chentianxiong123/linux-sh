@@ -210,6 +210,9 @@ class ToolboxApp:
         self._last_click_item = None
         self._last_target_tag = None
         
+        # 网格布局：支持空格子
+        self._grid_items = {}  # {grid_index: item}
+        
         self.load_desktops()
         self.draw_grid()
 
@@ -233,17 +236,23 @@ class ToolboxApp:
         """扫描 desktop 目录"""
         if not DESKTOP_DIR.exists():
             return
+        self.items = []
         for f in sorted(DESKTOP_DIR.glob("*.desktop")):
             self.items.append(parse_desktop(f))
-        # 加载保存的顺序
-        self._load_order()
+        # 加载保存的网格布局
+        self._load_grid()
+        # 初始化网格（如果没有保存的布局）
+        if not self._grid_items:
+            self._init_grid()
 
     def draw_grid(self):
-        """用 Canvas 画网格"""
+        """用 Canvas 画网格（支持空格子）"""
         if not self.items:
             return
 
-        rows = (len(self.items) + GRID_COLS - 1) // GRID_COLS
+        # 计算网格尺寸
+        total_slots = len(self._grid_items) if self._grid_items else len(self.items)
+        rows = (total_slots + GRID_COLS - 1) // GRID_COLS
         canvas_w = GRID_COLS * CELL_W + (GRID_COLS + 1) * PADDING
         canvas_h = rows * CELL_H + (rows + 1) * PADDING
 
@@ -260,20 +269,31 @@ class ToolboxApp:
         )
         self.canvas.pack(fill="both", expand=True)
 
-        for idx, item in enumerate(self.items):
+        # 绘制所有格子（包括空格子）
+        for idx in range(total_slots):
             col = idx % GRID_COLS
             row = idx // GRID_COLS
             x = PADDING + col * CELL_W + CELL_W // 2
             y = PADDING + row * CELL_H + CELL_H // 2
+            
+            item = self._grid_items.get(idx)
+            if item:
+                self.draw_cell(self.canvas, item, x, y, idx)
+            else:
+                # 空格子：画个淡色背景
+                x0, y0 = x - CELL_W // 2 + 10, y - CELL_H // 2 + 10
+                x1, y1 = x + CELL_W // 2 - 10, y + CELL_H // 2 - 10
+                self.canvas.create_rectangle(
+                    x0, y0, x1, y1,
+                    fill="#1a2240", outline="",
+                )
 
-            self.draw_cell(self.canvas, item, x, y)
-
-    def draw_cell(self, canvas, item, cx, cy):
+    def draw_cell(self, canvas, item, cx, cy, grid_idx):
         """画一个格子：背景卡片 + 图标 + 文字 + 高亮层"""
         x0, y0 = cx - CELL_W // 2 + 10, cy - CELL_H // 2 + 10
         x1, y1 = cx + CELL_W // 2 - 10, cy + CELL_H // 2 - 10
 
-        tag = f"cell_{id(item)}"
+        tag = f"cell_{grid_idx}"
 
         # 1. 背景卡片（最底层）
         canvas.create_rectangle(
@@ -293,7 +313,7 @@ class ToolboxApp:
         if photo:
             iy = cy - 15
             canvas.create_image(cx, iy, image=photo, anchor="center")
-            setattr(self, f"_img_{id(item)}", photo)  # 防止 GC
+            setattr(self, f"_img_{grid_idx}", photo)  # 防止 GC
         else:
             canvas.create_text(cx, cy - 15, text="📦", font=("Segoe UI Emoji", 28), fill=C_FG)
 
@@ -309,27 +329,31 @@ class ToolboxApp:
         )
 
         # 5. 点击区域（最上层，透明）
-        click_tag = f"click_{id(item)}"
+        click_tag = f"click_{grid_idx}"
         canvas.create_rectangle(
             x0, y0, x1, y1,
             fill="", outline="",
             tags=click_tag,
         )
 
-        # 绑定事件（全部在 click_tag 上）
-        canvas.tag_bind(click_tag, "<Button-1>", lambda e, i=item: self._on_press(e, i))
+        # 绑定事件
+        canvas.tag_bind(click_tag, "<Button-1>", lambda e, i=item, g=grid_idx: self._on_press(e, i, g))
         canvas.tag_bind(click_tag, "<B1-Motion>", lambda e: self._on_drag(e))
-        canvas.tag_bind(click_tag, "<ButtonRelease-1>", lambda e, i=item: self._on_release(e, i))
+        canvas.tag_bind(click_tag, "<ButtonRelease-1>", lambda e, i=item, g=grid_idx: self._on_release(e, i, g))
         canvas.tag_bind(click_tag, "<Button-3>", lambda e, i=item: self.show_menu(e, i))
         canvas.tag_bind(click_tag, "<Enter>", lambda e, t=tag: self.on_hover(t, True))
         canvas.tag_bind(click_tag, "<Leave>", lambda e, t=tag: self.on_hover(t, False))
-        
-        # 保存位置信息用于拖拽检测
-        item['_pos'] = (cx, cy)
 
-    def _on_press(self, event, item):
+    def _init_grid(self):
+        """初始化网格布局"""
+        self._grid_items = {}
+        for idx, item in enumerate(self.items):
+            self._grid_items[idx] = item
+
+    def _on_press(self, event, item, grid_idx):
         """鼠标按下：记录起始位置，准备拖拽"""
         self._drag_item = item
+        self._drag_grid_idx = grid_idx
         self._drag_start_x = event.x
         self._drag_start_y = event.y
         self._is_dragging = False
@@ -355,7 +379,7 @@ class ToolboxApp:
             self._update_drag_visual(event)
             self._highlight_drop_target(event)
 
-    def _on_release(self, event, item):
+    def _on_release(self, event, item, grid_idx):
         """松开：完成拖拽或单击/双击"""
         if self._is_dragging:
             # 完成拖拽
@@ -373,7 +397,7 @@ class ToolboxApp:
                 self._last_click_item = None
             else:
                 # 单击：选中
-                tag = f"cell_{id(item)}"
+                tag = f"cell_{grid_idx}"
                 self.select(item, tag)
                 self._last_click_time = now
                 self._last_click_item = item
@@ -429,77 +453,82 @@ class ToolboxApp:
 
     def _highlight_drop_target(self, event):
         """高亮鼠标下的目标格子"""
-        if hasattr(self, '_last_target_tag'):
+        if self._last_target_tag:
             self.canvas.itemconfig(self._last_target_tag, fill="", outline="")
         
-        # 检测鼠标下的格子
-        for item in self.items:
-            if '_pos' not in item:
-                continue
-            cx, cy = item['_pos']
-            if abs(event.x - cx) < CELL_W // 2 and abs(event.y - cy) < CELL_H // 2:
-                if item != self._drag_item:
-                    tag = f"cell_{id(item)}"
-                    self.canvas.itemconfig(tag, fill="#2a4f7e", outline=C_ACCENT)
-                    self._last_target_tag = tag
-                break
+        # 计算鼠标所在的网格位置
+        col = (event.x - PADDING) // CELL_W
+        row = (event.y - PADDING) // CELL_H
+        target_idx = row * GRID_COLS + col
+        
+        # 检查目标格子是否存在
+        total_slots = len(self._grid_items) if self._grid_items else len(self.items)
+        if target_idx < 0 or target_idx >= total_slots:
+            return
+        
+        # 如果不是拖拽源格子，高亮
+        if target_idx != self._drag_grid_idx:
+            tag = f"cell_{target_idx}"
+            self.canvas.itemconfig(tag, fill="#2a4f7e", outline=C_ACCENT)
+            self._last_target_tag = tag
 
     def _complete_drop(self, event):
-        """完成拖拽：交换两个格子"""
-        target = None
-        for item in self.items:
-            if '_pos' not in item:
-                continue
-            cx, cy = item['_pos']
-            if abs(event.x - cx) < CELL_W // 2 and abs(event.y - cy) < CELL_H // 2:
-                if item != self._drag_item:
-                    target = item
-                break
+        """完成拖拽：移动到目标位置"""
+        # 计算目标网格位置
+        col = (event.x - PADDING) // CELL_W
+        row = (event.y - PADDING) // CELL_H
+        dst_idx = row * GRID_COLS + col
         
-        if target:
-            # 交换两个 item 在列表中的位置
-            src_idx = self.items.index(self._drag_item)
-            dst_idx = self.items.index(target)
-            self.items[src_idx], self.items[dst_idx] = self.items[dst_idx], self.items[src_idx]
-            # 重绘
-            self.canvas.delete("all")
-            self.draw_grid()
-            # 保存顺序
-            self._save_order()
+        src_idx = self._drag_grid_idx
+        
+        # 边界检查
+        total_slots = len(self._grid_items)
+        if dst_idx < 0 or dst_idx >= total_slots or dst_idx == src_idx:
+            return
+        
+        # 移动：源位置清空，目标位置放入
+        item = self._grid_items.pop(src_idx)
+        self._grid_items[dst_idx] = item
+        
+        # 重绘
+        self.draw_grid()
+        # 保存布局
+        self._save_grid()
 
-    def _save_order(self):
-        """保存图标顺序到文件"""
+    def _save_grid(self):
+        """保存网格布局到文件"""
         import json
         from pathlib import Path
-        order_file = Path.home() / ".config" / "toolbox" / "order.json"
+        order_file = Path.home() / ".config" / "toolbox" / "grid.json"
         order_file.parent.mkdir(parents=True, exist_ok=True)
-        order = [item['path'] for item in self.items]
+        # 保存 {index: path} 映射
+        grid = {str(k): v['path'] for k, v in self._grid_items.items()}
         with open(order_file, 'w') as f:
-            json.dump(order, f)
+            json.dump(grid, f)
 
-    def _load_order(self):
-        """加载图标顺序"""
+    def _load_grid(self):
+        """加载网格布局"""
         import json
         from pathlib import Path
-        order_file = Path.home() / ".config" / "toolbox" / "order.json"
+        order_file = Path.home() / ".config" / "toolbox" / "grid.json"
         if not order_file.exists():
             return
         try:
             with open(order_file) as f:
-                order = json.load(f)
-            # 按保存的顺序重新排列
+                grid = json.load(f)
+            # 按保存的布局重新排列
             path_to_item = {item['path']: item for item in self.items}
-            new_items = []
-            for path in order:
+            self._grid_items = {}
+            for idx_str, path in grid.items():
+                idx = int(idx_str)
                 if path in path_to_item:
-                    new_items.append(path_to_item[path])
-            # 添加未在保存顺序中的新文件
+                    self._grid_items[idx] = path_to_item[path]
+            # 添加未在保存布局中的新文件
             for item in self.items:
-                if item not in new_items:
-                    new_items.append(item)
-            self.items = new_items
+                if item not in self._grid_items.values():
+                    self._grid_items[len(self._grid_items)] = item
         except Exception:
-            pass
+            self._init_grid()
 
     def make_photo(self, item):
         """把 PIL Image 转成 Tkinter PhotoImage"""
