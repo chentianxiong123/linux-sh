@@ -133,9 +133,6 @@ def _req(url, **kw):
     return r
 
 
-MAX_SEARCH_MIN = 20  # 短时长优先：超过这个时长的结果直接滤掉（课程/长直播）
-
-
 def _parse_dur(s):
     """B站 时长串 'mm:ss' / 'h:mm:ss' → 秒；解析失败返回 -1"""
     try:
@@ -148,11 +145,14 @@ def _parse_dur(s):
 
 
 def _search(keyword):
+    """B站搜索：API 原生 duration=1(10分钟以下) 过滤短视频，本地再按时长升序
+    参数：duration 0全/1<10分/2 10-30分/3 30-60分/4>60分；order 排序；tids 分区"""
     r = _req(API["search"], params={
         "keyword": keyword,
         "search_type": "video",
         "page": 1,
-        "pagesize": 30,
+        "pagesize": 50,
+        "duration": 1,   # 服务器端就只要 10 分钟以下的
     }).json()
     if r.get("code") != 0:
         raise ValueError(r.get("message", "搜索失败"))
@@ -165,8 +165,8 @@ def _search(keyword):
             "author": it.get("author", ""),
             "sec": _parse_dur(it.get("duration", "")),
         })
-    # 短时长优先：滤掉超长/时长解析失败，剩余按时长升序
-    out = [it for it in out if 0 < it["sec"] <= MAX_SEARCH_MIN * 60]
+    # 解析失败/异常时长滤掉，剩余按时长升序（MV/翻唱排前）
+    out = [it for it in out if it["sec"] > 0]
     out.sort(key=lambda it: it["sec"])
     return out
 
