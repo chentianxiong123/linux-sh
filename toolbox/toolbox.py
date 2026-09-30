@@ -26,7 +26,9 @@ except ImportError:
 # ── 配置 ──────────────────────────────────────────────
 DESKTOP_DIR = Path("/home/a1/sh/desktop")
 ICON_SIZE = 64
-GRID_COLS = 4
+GRID_COLS = 5
+ROWS_PER_PAGE = 2   # 每页行数
+PER_PAGE = GRID_COLS * ROWS_PER_PAGE  # 每页格子数 = 10
 PADDING = 20
 CELL_W = 140
 CELL_H = 140
@@ -39,6 +41,14 @@ C_MUTED = "#8888aa"
 C_ACCENT = "#7b68ee"
 C_OK = "#4ade80"    # 成功
 C_ERR = "#f87171"   # 错误
+
+# 尺寸档位：小 / 中 / 大（可右键切换，持久化保存）
+SIZE_PRESETS = {
+    "小": {"icon": 48, "cell_w": 105, "cell_h": 115, "pad": 16, "win_w": 660, "win_h": 400},
+    "中": {"icon": 64, "cell_w": 140, "cell_h": 140, "pad": 20, "win_w": 860, "win_h": 460},
+    "大": {"icon": 80, "cell_w": 175, "cell_h": 175, "pad": 24, "win_w": 1040, "win_h": 540},
+}
+SETTINGS_FILE = Path.home() / ".config" / "toolbox" / "settings.json"
 
 # 图标搜索：主题 + 目录类型 + 尺寸
 ICON_THEMES = ["breeze-dark", "breeze", "hicolor", "Adwaita"]
@@ -196,10 +206,15 @@ class ToolboxApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Toolbox")
-        self.root.geometry("800x600")
         self.root.configure(bg=C_BG)
         self.root.resizable(False, False)
         self.root.wm_protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # 加载设置 + 应用尺寸档位（设置窗口大小）
+        self._size = "中"
+        self._size_var = tk.StringVar(value=self._size)
+        self._load_settings()
+        self.apply_size(self._size)
 
         # 注册系统级拖放：从桌面拖 .desktop 文件进来 = 导入工具
         if HAS_DND:
@@ -229,6 +244,12 @@ class ToolboxApp:
         # 双击检测（用 Tkinter 原生 Double-Button-1，无需自建）
         self._last_target_tag = None
         
+        # 分页状态
+        self._page = 0
+        self._page_count = 1
+        self._page_label = None
+        
+        self._build_nav()
         self.load_desktops()
         self.draw_grid()
 
@@ -294,13 +315,37 @@ class ToolboxApp:
         return event.action
 
     def draw_grid(self):
-        """用 Canvas 画网格"""
+        """画当前页的网格（分页）"""
         if not self.items:
+            # 空状态提示
+            if hasattr(self, 'canvas'):
+                self.canvas.destroy()
+                del self.canvas
+            if hasattr(self, '_empty_label'):
+                self._empty_label.destroy()
+            self._empty_label = tk.Label(
+                self.root,
+                text=f"暂无工具\n拖入 .desktop 文件可添加",
+                font=("Microsoft YaHei", 11),
+                fg=C_MUTED,
+                bg=C_BG,
+                justify="center",
+            )
+            self._empty_label.pack(expand=True)
+            self._update_page_label()
             return
+        if hasattr(self, '_empty_label'):
+            self._empty_label.destroy()
 
-        rows = (len(self.items) + GRID_COLS - 1) // GRID_COLS
+        # 页数 + 页码修正
+        self._page_count = max(1, (len(self.items) + PER_PAGE - 1) // PER_PAGE)
+        if self._page >= self._page_count:
+            self._page = self._page_count - 1
+        start = self._page * PER_PAGE
+        end = min(len(self.items), start + PER_PAGE)
+
         canvas_w = GRID_COLS * CELL_W + (GRID_COLS + 1) * PADDING
-        canvas_h = rows * CELL_H + (rows + 1) * PADDING
+        canvas_h = ROWS_PER_PAGE * CELL_H + (ROWS_PER_PAGE + 1) * PADDING
 
         # 销毁旧 canvas
         if hasattr(self, 'canvas'):
@@ -315,13 +360,94 @@ class ToolboxApp:
         )
         self.canvas.pack(fill="both", expand=True)
 
-        for idx, item in enumerate(self.items):
-            col = idx % GRID_COLS
-            row = idx // GRID_COLS
+        # 只画当前页的 items（tag 用全局索引）
+        for gidx in range(start, end):
+            local = gidx - start
+            col = local % GRID_COLS
+            row = local // GRID_COLS
             x = PADDING + col * CELL_W + CELL_W // 2
             y = PADDING + row * CELL_H + CELL_H // 2
 
-            self.draw_cell(self.canvas, item, x, y, idx)
+            self.draw_cell(self.canvas, self.items[gidx], x, y, gidx)
+
+        self._update_page_label()
+
+    def _build_nav(self):
+        """底部翻页栏"""
+        self._nav = tk.Frame(self.root, bg=C_BG)
+        self._nav.pack(side="bottom", pady=4)
+        tk.Button(self._nav, text="◀ 上一页", command=self._prev_page,
+                  bg=C_CARD, fg=C_FG, relief="flat", font=("Microsoft YaHei", 10),
+                  activebackground=C_ACCENT, activeforeground="#fff",
+                  cursor="hand2").pack(side="left", padx=10)
+        self._page_label = tk.Label(self._nav, text="",
+                                    font=("Microsoft YaHei", 10), fg=C_MUTED, bg=C_BG)
+        self._page_label.pack(side="left", padx=10)
+        tk.Button(self._nav, text="下一页 ▶", command=self._next_page,
+                  bg=C_CARD, fg=C_FG, relief="flat", font=("Microsoft YaHei", 10),
+                  activebackground=C_ACCENT, activeforeground="#fff",
+                  cursor="hand2").pack(side="left", padx=10)
+        tk.Button(self._nav, text="📐", command=lambda: self._size_menu_toggle(),
+                  bg=C_CARD, fg=C_MUTED, relief="flat", font=("Microsoft YaHei", 11),
+                  activebackground=C_ACCENT, activeforeground="#fff",
+                  cursor="hand2").pack(side="left", padx=10)
+
+    def _size_menu_toggle(self):
+        """📐 循环切换尺寸：小 → 中 → 大"""
+        names = list(SIZE_PRESETS.keys())
+        idx = names.index(self._size)
+        self.apply_size(names[(idx + 1) % len(names)])
+
+    def apply_size(self, name):
+        """应用尺寸档位（修改全局尺寸常量 + 窗口大小 + 重绘）"""
+        global ICON_SIZE, CELL_W, CELL_H, PADDING
+        p = SIZE_PRESETS.get(name)
+        if not p:
+            return
+        ICON_SIZE, CELL_W, CELL_H, PADDING = p["icon"], p["cell_w"], p["cell_h"], p["pad"]
+        self._size = name
+        self._size_var.set(name)
+        self.root.geometry(f"{p['win_w']}x{p['win_h']}")
+        self._save_settings()
+        if hasattr(self, "canvas"):
+            self.draw_grid()
+
+    def _save_settings(self):
+        """保存设置（尺寸档位）"""
+        try:
+            SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(SETTINGS_FILE, "w") as f:
+                import json
+                json.dump({"size": self._size}, f)
+        except Exception:
+            pass
+
+    def _load_settings(self):
+        """加载设置"""
+        try:
+            import json
+            if SETTINGS_FILE.exists():
+                with open(SETTINGS_FILE) as f:
+                    data = json.load(f)
+                if data.get("size") in SIZE_PRESETS:
+                    self._size = data["size"]
+        except Exception:
+            pass
+
+    def _update_page_label(self):
+        """更新页码显示"""
+        if self._page_label:
+            self._page_label.config(text=f"第 {self._page + 1} / {self._page_count} 页")
+
+    def _prev_page(self):
+        if self._page > 0:
+            self._page -= 1
+            self.draw_grid()
+
+    def _next_page(self):
+        if self._page < self._page_count - 1:
+            self._page += 1
+            self.draw_grid()
 
     def draw_cell(self, canvas, item, cx, cy, grid_idx):
         """画一个格子：背景卡片 + 图标 + 文字 + 高亮层"""
@@ -344,21 +470,21 @@ class ToolboxApp:
             tags=(tag, f"hl_{grid_idx}"),
         )
 
-        # 3. 图标
+        # 3. 图标（相对位置，适配不同尺寸档位）
         photo = self.make_photo(item)
         if photo:
-            iy = cy - 15
+            iy = cy - int(CELL_H * 0.15)
             canvas.create_image(cx, iy, image=photo, anchor="center", tags=tag)
             setattr(self, f"_img_{grid_idx}", photo)  # 防止 GC
         else:
-            canvas.create_text(cx, cy - 15, text="📦", font=("Segoe UI Emoji", 28), fill=C_FG, tags=tag)
+            canvas.create_text(cx, cy - int(CELL_H * 0.15), text="📦", font=("Segoe UI Emoji", 28), fill=C_FG, tags=tag)
 
         # 4. 文字
         name = item["name"]
         if len(name) > 10:
             name = name[:9] + "…"
         canvas.create_text(
-            cx, cy + 30,
+            cx, cy + int(CELL_H * 0.25),
             text=name,
             font=("Microsoft YaHei", 9),
             fill=C_FG,
@@ -383,16 +509,24 @@ class ToolboxApp:
         canvas.tag_bind(click_tag, "<Leave>", lambda e, t=f"hl_{grid_idx}": self.on_hover(t, False))
 
     def _cell_center(self, idx):
-        """根据索引计算格子中心坐标"""
-        col = idx % GRID_COLS
-        row = idx // GRID_COLS
+        """全局索引 → 当前页内中心坐标"""
+        start = self._page * PER_PAGE
+        local = idx - start
+        col = local % GRID_COLS
+        row = local // GRID_COLS
         return PADDING + col * CELL_W + CELL_W // 2, PADDING + row * CELL_H + CELL_H // 2
 
     def _idx_at(self, x, y):
-        """根据鼠标坐标计算格子索引"""
+        """鼠标坐标 → 全局索引（仅当前页内，页外返回 -1）"""
         col = (x - PADDING) // CELL_W
         row = (y - PADDING) // CELL_H
-        return row * GRID_COLS + col
+        local = row * GRID_COLS + col
+        start = self._page * PER_PAGE
+        end = min(len(self.items), start + PER_PAGE)
+        gidx = start + local
+        if gidx < start or gidx >= end:
+            return -1
+        return gidx
 
     def _on_press(self, event, item, grid_idx):
         """鼠标按下：记录起始位置，准备拖拽"""
@@ -492,12 +626,11 @@ class ToolboxApp:
             self.canvas.itemconfig(self._last_target_tag, fill="", outline="")
             self._last_target_tag = None
         
-        # 用坐标直接算索引，不用 _pos 缓存
+        # 用坐标直接算索引（页内映射到全局），不用 _pos 缓存
         dst_idx = self._idx_at(event.x, event.y)
         src_idx = self.items.index(self._drag_item)
-        total = len(self.items)
         
-        if 0 <= dst_idx < total and dst_idx != src_idx:
+        if dst_idx >= 0 and dst_idx != src_idx:
             self.canvas.itemconfig(f"hl_{dst_idx}", fill="#2a4f7e", outline=C_ACCENT)
             self._last_target_tag = f"hl_{dst_idx}"
 
@@ -505,9 +638,8 @@ class ToolboxApp:
         """完成拖拽：交换两个格子（局部更新）"""
         src_idx = self.items.index(self._drag_item)
         dst_idx = self._idx_at(event.x, event.y)
-        total = len(self.items)
         
-        if dst_idx < 0 or dst_idx >= total or dst_idx == src_idx:
+        if dst_idx < 0 or dst_idx == src_idx:
             return
         
         # 交换列表
@@ -604,13 +736,25 @@ class ToolboxApp:
         self.canvas.itemconfig(f"hl_{idx}", fill="#1e2f5e", outline=C_ACCENT)
 
     def show_menu(self, event, item):
-        """右键菜单：极简两项，点击外部/失焦自动关闭"""
+        """右键菜单：复制地址 / 删除 / 尺寸"""
         self._close_menu()
         
         menu = tk.Menu(self.root, tearoff=0)
         
         # 复制地址
         menu.add_command(label="📄 复制地址", command=lambda: self.copy_path(item))
+        menu.add_separator()
+        
+        # 尺寸选择（单选）
+        size_menu = tk.Menu(menu, tearoff=0)
+        for name in SIZE_PRESETS:
+            size_menu.add_radiobutton(
+                label=name,
+                variable=self._size_var,
+                value=name,
+                command=lambda n=name: self.apply_size(n),
+            )
+        menu.add_cascade(label="📐 尺寸", menu=size_menu)
         menu.add_separator()
         
         # 删除此工具
