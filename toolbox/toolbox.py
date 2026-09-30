@@ -5,10 +5,17 @@
 """
 
 import os
+import shutil
 import subprocess
 import time
 import tkinter as tk
 from pathlib import Path
+
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+    HAS_DND = True
+except ImportError:
+    HAS_DND = False
 
 try:
     from PIL import Image, ImageTk
@@ -194,6 +201,14 @@ class ToolboxApp:
         self.root.resizable(False, False)
         self.root.wm_protocol("WM_DELETE_WINDOW", self._on_close)
 
+        # 注册系统级拖放：从桌面拖 .desktop 文件进来 = 导入工具
+        if HAS_DND:
+            try:
+                self.root.drop_target_register(DND_FILES)
+                self.root.dnd_bind("<<Drop>>", self.on_drop)
+            except Exception:
+                pass
+
         self.items = []
         self._selected_idx = -1  # 当前选中的格子索引（-1 = 无）
         
@@ -230,12 +245,48 @@ class ToolboxApp:
 
     def load_desktops(self):
         """扫描 desktop 目录"""
+        self.items = []
         if not DESKTOP_DIR.exists():
             return
         for f in sorted(DESKTOP_DIR.glob("*.desktop")):
             self.items.append(parse_desktop(f))
         # 加载保存的顺序
         self._load_order()
+
+    def on_drop(self, event):
+        """从外部拖入 .desktop 文件：复制进持久化目录 + 刷新网格"""
+        imported = 0
+        skipped = 0
+        try:
+            files = self.root.tk.splitlist(event.data)
+        except Exception:
+            files = [event.data]
+        
+        for f in files:
+            f = f.strip()
+            if not f:
+                continue
+            src = Path(f)
+            if src.suffix.lower() != ".desktop":
+                skipped += 1
+                continue
+            try:
+                dst = DESKTOP_DIR / src.name
+                shutil.copy2(src, dst)
+                imported += 1
+            except Exception as e:
+                self._show_notification(f"导入失败 {src.name}: {e}", True)
+        
+        if imported:
+            # 重新扫描 + 重绘（新文件追加到最后）
+            self.load_desktops()
+            self.draw_grid()
+            self._selected_idx = -1
+            self._show_notification(f"已导入 {imported} 个工具 → {DESKTOP_DIR}")
+        elif skipped:
+            self._show_notification("只接受 .desktop 文件", True)
+        
+        return event.action
 
     def draw_grid(self):
         """用 Canvas 画网格"""
@@ -622,6 +673,8 @@ class ToolboxApp:
                 subprocess.Popen(["xdg-open", dir_path],
                                stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL,
+                               stdin=subprocess.DEVNULL,
+                               close_fds=True,
                                start_new_session=True)
             except Exception:
                 # 兜底：用 dolphin
@@ -629,6 +682,8 @@ class ToolboxApp:
                     subprocess.Popen(["dolphin", dir_path],
                                    stdout=subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL,
+                                   stdin=subprocess.DEVNULL,
+                                   close_fds=True,
                                    start_new_session=True)
                 except Exception as e:
                     tk.messagebox.showerror("打开失败", str(e))
@@ -648,21 +703,26 @@ class ToolboxApp:
         lbl.after(2000, lbl.destroy)
 
     def launch(self, item):
-        """双击启动工具（脱离父进程会话）"""
+        """双击启动工具（完全脱离父进程）"""
         if item["exec"]:
             try:
                 subprocess.Popen(
                     item["exec"],
                     shell=True,
+                    stdin=subprocess.DEVNULL,   # 不继承 toolbox 的 stdin
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    start_new_session=True,  # 脱离 toolbox 会话，独立运行
+                    close_fds=True,             # 不继承任何多余 fd
+                    start_new_session=True,     # 新会话（等价 setsid）
                 )
             except Exception as e:
                 tk.messagebox.showerror("启动失败", f"{item['name']}: {e}")
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
+    if HAS_DND:
+        root = TkinterDnD.Tk()
+    else:
+        root = tk.Tk()
     ToolboxApp(root)
     root.mainloop()
