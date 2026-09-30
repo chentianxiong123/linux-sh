@@ -25,13 +25,15 @@ except ImportError:
 
 # ── 配置 ──────────────────────────────────────────────
 DESKTOP_DIR = Path("/home/a1/sh/desktop")
+
+# 布局常量（cell 大小可被 Ctrl+滚轮缩放，持久化保存）
 ICON_SIZE = 64
-GRID_COLS = 5
-ROWS_PER_PAGE = 2   # 每页行数
-PER_PAGE = GRID_COLS * ROWS_PER_PAGE  # 每页格子数 = 10
-PADDING = 20
 CELL_W = 140
 CELL_H = 140
+PADDING = 20
+GRID_COLS = 5          # 列数，随窗口宽度自适应
+ROWS_PER_PAGE = 2      # 每页行数（固定）
+SETTINGS_FILE = Path.home() / ".config" / "toolbox" / "settings.json"
 
 # 主题色（跟其他工具一致）
 C_BG = "#1a1a2e"
@@ -41,14 +43,6 @@ C_MUTED = "#8888aa"
 C_ACCENT = "#7b68ee"
 C_OK = "#4ade80"    # 成功
 C_ERR = "#f87171"   # 错误
-
-# 尺寸档位：小 / 中 / 大（可右键切换，持久化保存）
-SIZE_PRESETS = {
-    "小": {"icon": 48, "cell_w": 105, "cell_h": 115, "pad": 16, "win_w": 660, "win_h": 400},
-    "中": {"icon": 64, "cell_w": 140, "cell_h": 140, "pad": 20, "win_w": 860, "win_h": 460},
-    "大": {"icon": 80, "cell_w": 175, "cell_h": 175, "pad": 24, "win_w": 1040, "win_h": 540},
-}
-SETTINGS_FILE = Path.home() / ".config" / "toolbox" / "settings.json"
 
 # 图标搜索：主题 + 目录类型 + 尺寸
 ICON_THEMES = ["breeze-dark", "breeze", "hicolor", "Adwaita"]
@@ -207,14 +201,19 @@ class ToolboxApp:
         self.root = root
         self.root.title("Toolbox")
         self.root.configure(bg=C_BG)
-        self.root.resizable(False, False)
         self.root.wm_protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # 加载设置 + 应用尺寸档位（设置窗口大小）
-        self._size = "中"
-        self._size_var = tk.StringVar(value=self._size)
+        # 加载设置（cell 大小 + 窗口大小）
         self._load_settings()
-        self.apply_size(self._size)
+        self.root.geometry(self._win_geometry)
+        
+        # 窗口可自由缩放，列数自适应
+        self.root.resizable(True, True)
+        self.root.minsize(480, 300)
+        self.root.bind("<Configure>", self._on_resize)
+        # Ctrl+滚轮缩放格子大小
+        self.root.bind("<Control-MouseWheel>", self._zoom)
+        self._resize_pending = None
 
         # 注册系统级拖放：从桌面拖 .desktop 文件进来 = 导入工具
         if HAS_DND:
@@ -266,7 +265,8 @@ class ToolboxApp:
             label.pack(expand=True)
 
     def _on_close(self):
-        """窗口关闭"""
+        """窗口关闭：保存设置 + 销毁"""
+        self._save_settings()
         self.root.destroy()
 
     def load_desktops(self):
@@ -338,11 +338,11 @@ class ToolboxApp:
             self._empty_label.destroy()
 
         # 页数 + 页码修正
-        self._page_count = max(1, (len(self.items) + PER_PAGE - 1) // PER_PAGE)
+        self._page_count = max(1, (len(self.items) + GRID_COLS * ROWS_PER_PAGE - 1) // (GRID_COLS * ROWS_PER_PAGE))
         if self._page >= self._page_count:
             self._page = self._page_count - 1
-        start = self._page * PER_PAGE
-        end = min(len(self.items), start + PER_PAGE)
+        start = self._page * GRID_COLS * ROWS_PER_PAGE
+        end = min(len(self.items), start + GRID_COLS * ROWS_PER_PAGE)
 
         canvas_w = GRID_COLS * CELL_W + (GRID_COLS + 1) * PADDING
         canvas_h = ROWS_PER_PAGE * CELL_H + (ROWS_PER_PAGE + 1) * PADDING
@@ -387,50 +387,71 @@ class ToolboxApp:
                   bg=C_CARD, fg=C_FG, relief="flat", font=("Microsoft YaHei", 10),
                   activebackground=C_ACCENT, activeforeground="#fff",
                   cursor="hand2").pack(side="left", padx=10)
-        tk.Button(self._nav, text="📐", command=lambda: self._size_menu_toggle(),
-                  bg=C_CARD, fg=C_MUTED, relief="flat", font=("Microsoft YaHei", 11),
-                  activebackground=C_ACCENT, activeforeground="#fff",
-                  cursor="hand2").pack(side="left", padx=10)
 
-    def _size_menu_toggle(self):
-        """📐 循环切换尺寸：小 → 中 → 大"""
-        names = list(SIZE_PRESETS.keys())
-        idx = names.index(self._size)
-        self.apply_size(names[(idx + 1) % len(names)])
-
-    def apply_size(self, name):
-        """应用尺寸档位（修改全局尺寸常量 + 窗口大小 + 重绘）"""
-        global ICON_SIZE, CELL_W, CELL_H, PADDING
-        p = SIZE_PRESETS.get(name)
-        if not p:
+    def _on_resize(self, event):
+        """窗口尺寸变化 → 重算列数 → 重绘（防抖）"""
+        if event.widget is not self.root:
             return
-        ICON_SIZE, CELL_W, CELL_H, PADDING = p["icon"], p["cell_w"], p["cell_h"], p["pad"]
-        self._size = name
-        self._size_var.set(name)
-        self.root.geometry(f"{p['win_w']}x{p['win_h']}")
-        self._save_settings()
-        if hasattr(self, "canvas"):
+        if self._resize_pending:
+            self.root.after_cancel(self._resize_pending)
+        self._resize_pending = self.root.after(120, self._apply_layout)
+        # 记住窗口大小，退出/切换时保存
+        self._win_geometry = f"{event.width}x{event.height}"
+
+    def _apply_layout(self):
+        """根据当前窗口宽度重算列数并重绘"""
+        global GRID_COLS
+        self._resize_pending = None
+        if not hasattr(self, "canvas"):
+            return
+        avail_w = self.canvas.winfo_width()
+        if avail_w < 60:
+            avail_w = self.root.winfo_width() - 20
+        cols = max(2, (avail_w - PADDING) // CELL_W)
+        if cols != GRID_COLS:
+            GRID_COLS = cols
             self.draw_grid()
 
+    def _zoom(self, event):
+        """Ctrl+滚轮：缩放格子/图标大小"""
+        global CELL_W, CELL_H, ICON_SIZE
+        delta = 8 if event.delta > 0 else -8
+        new_w = max(80, min(220, CELL_W + delta))
+        if new_w == CELL_W:
+            return
+        CELL_W = new_w
+        CELL_H = new_w                    # 格子正方形
+        ICON_SIZE = int(new_w * 0.45)     # 图标约占 45%
+        self._save_settings()
+        self._apply_layout()              # 列数随格子大小变化
+        self._show_notification(f"格子 {CELL_W}px · {GRID_COLS} 列")
+
     def _save_settings(self):
-        """保存设置（尺寸档位）"""
+        """保存设置（格子大小 + 窗口大小）"""
         try:
             SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(SETTINGS_FILE, "w") as f:
                 import json
-                json.dump({"size": self._size}, f)
+                json.dump({"cell_w": CELL_W, "geometry": self._win_geometry}, f)
         except Exception:
             pass
 
     def _load_settings(self):
         """加载设置"""
+        global CELL_W, CELL_H, ICON_SIZE
+        self._win_geometry = "860x460"
         try:
             import json
             if SETTINGS_FILE.exists():
                 with open(SETTINGS_FILE) as f:
                     data = json.load(f)
-                if data.get("size") in SIZE_PRESETS:
-                    self._size = data["size"]
+                cw = data.get("cell_w", 140)
+                if 80 <= cw <= 220:
+                    CELL_W = cw
+                    CELL_H = cw
+                    ICON_SIZE = int(cw * 0.45)
+                if data.get("geometry"):
+                    self._win_geometry = data["geometry"]
         except Exception:
             pass
 
@@ -510,7 +531,7 @@ class ToolboxApp:
 
     def _cell_center(self, idx):
         """全局索引 → 当前页内中心坐标"""
-        start = self._page * PER_PAGE
+        start = self._page * GRID_COLS * ROWS_PER_PAGE
         local = idx - start
         col = local % GRID_COLS
         row = local // GRID_COLS
@@ -521,8 +542,8 @@ class ToolboxApp:
         col = (x - PADDING) // CELL_W
         row = (y - PADDING) // CELL_H
         local = row * GRID_COLS + col
-        start = self._page * PER_PAGE
-        end = min(len(self.items), start + PER_PAGE)
+        start = self._page * GRID_COLS * ROWS_PER_PAGE
+        end = min(len(self.items), start + GRID_COLS * ROWS_PER_PAGE)
         gidx = start + local
         if gidx < start or gidx >= end:
             return -1
@@ -736,25 +757,13 @@ class ToolboxApp:
         self.canvas.itemconfig(f"hl_{idx}", fill="#1e2f5e", outline=C_ACCENT)
 
     def show_menu(self, event, item):
-        """右键菜单：复制地址 / 删除 / 尺寸"""
+        """右键菜单：复制地址 / 删除"""
         self._close_menu()
         
         menu = tk.Menu(self.root, tearoff=0)
         
         # 复制地址
         menu.add_command(label="📄 复制地址", command=lambda: self.copy_path(item))
-        menu.add_separator()
-        
-        # 尺寸选择（单选）
-        size_menu = tk.Menu(menu, tearoff=0)
-        for name in SIZE_PRESETS:
-            size_menu.add_radiobutton(
-                label=name,
-                variable=self._size_var,
-                value=name,
-                command=lambda n=name: self.apply_size(n),
-            )
-        menu.add_cascade(label="📐 尺寸", menu=size_menu)
         menu.add_separator()
         
         # 删除此工具
