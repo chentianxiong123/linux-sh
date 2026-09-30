@@ -206,9 +206,7 @@ class ToolboxApp:
         self._is_dragging = False
         self._drag_threshold = 5  # 像素阈值，超过才算拖拽
         
-        # 双击检测
-        self._last_click_time = None
-        self._last_click_item = None
+        # 双击检测（用 Tkinter 原生 Double-Button-1，无需自建）
         self._last_target_tag = None
         
         self.load_desktops()
@@ -321,6 +319,7 @@ class ToolboxApp:
 
         # 绑定事件（全部在 click_tag 上）
         canvas.tag_bind(click_tag, "<Button-1>", lambda e, i=item, g=grid_idx: self._on_press(e, i, g))
+        canvas.tag_bind(click_tag, "<Double-Button-1>", lambda e, i=item: self.launch(i))
         canvas.tag_bind(click_tag, "<B1-Motion>", lambda e: self._on_drag(e))
         canvas.tag_bind(click_tag, "<ButtonRelease-1>", lambda e, i=item, g=grid_idx: self._on_release(e, i, g))
         canvas.tag_bind(click_tag, "<Button-3>", lambda e, i=item: self.show_menu(e, i))
@@ -345,8 +344,6 @@ class ToolboxApp:
         self._drag_grid_idx = grid_idx
         self._drag_start_x = event.x
         self._drag_start_y = event.y
-        self._is_dragging = False
-        # 注意：不重置 _last_click_time，让 _on_release 检测双击
 
     def _on_drag(self, event):
         """拖动中：超过阈值则开始拖拽"""
@@ -367,7 +364,7 @@ class ToolboxApp:
             self._highlight_drop_target(event)
 
     def _on_release(self, event, item, grid_idx):
-        """松开：完成拖拽或单击/双击"""
+        """松开：完成拖拽或单击选中"""
         was_dragging = self._is_dragging
         try:
             if was_dragging:
@@ -379,21 +376,9 @@ class ToolboxApp:
             self._drag_item = None
             self._is_dragging = False
         
-        # 单击/双击检测（只有非拖拽路径才执行）
+        # 单击：选中（双击由 Double-Button-1 处理）
         if not was_dragging:
-            now = time.time()
-            if (self._last_click_time is not None and
-                self._last_click_item == item and
-                (now - self._last_click_time) < 0.3):
-                # 双击：启动
-                self.launch(item)
-                self._last_click_time = None
-                self._last_click_item = None
-            else:
-                # 单击：选中
-                self.select(item, grid_idx)
-                self._last_click_time = now
-                self._last_click_item = item
+            self.select(item, grid_idx)
 
     def _create_drag_visual(self, event):
         """创建拖拽视觉（半透明图标跟随鼠标）"""
