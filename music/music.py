@@ -10,6 +10,7 @@
 """
 
 import os
+import json
 import re
 import signal
 import subprocess
@@ -17,9 +18,41 @@ import threading
 import time
 import uuid
 import tkinter as tk
+from pathlib import Path
 from tkinter import ttk, filedialog, messagebox
 
 import requests
+
+# ── 历史记录：只存 ID/标题，不缓存音频 ────────────────
+HISTORY_FILE = Path.home() / ".config" / "music" / "history.json"
+HISTORY_MAX = 20
+
+
+def _load_history():
+    """读取历史（[{bvid,title,author,duration,qn}]）"""
+    try:
+        if HISTORY_FILE.exists():
+            with open(HISTORY_FILE) as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return data
+    except Exception:
+        pass
+    return []
+
+
+def _save_history(entry):
+    """写入一条历史，同 bvid 去重，最多 20 条"""
+    try:
+        HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        hist = _load_history()
+        hist = [h for h in hist if h.get("bvid") != entry.get("bvid")]
+        hist.insert(0, entry)
+        hist = hist[:HISTORY_MAX]
+        with open(HISTORY_FILE, "w") as f:
+            json.dump(hist, f, ensure_ascii=False)
+    except Exception:
+        pass
 
 # ── B站 API ──────────────────────────────────────────────
 BUILTIN_HEADERS = {
@@ -143,16 +176,18 @@ class Player:
         self.paplay = None
         self.url = ""
         self.duration = 0
+        self.offset = 0.0          # seek 起点（秒）
         self.started_at = 0.0
         self.paused = False
         self._tick_cb = on_tick
         self._end_cb = on_end
         self.lock = threading.Lock()
 
-    def load(self, url, duration):
+    def load(self, url, duration, offset=0.0):
         self.stop()
         self.url = url
         self.duration = duration
+        self.offset = offset
         self.paused = False
         self.started_at = 0.0
 
@@ -161,19 +196,20 @@ class Player:
             if not self.url or self.ffmpeg is not None:
                 return
             # ffmpeg 拉流 → 解码 → 转 WAV PCM → 管道给 paplay
-            # ffmpeg 拉纯音频 M4A → 解码为 PCM WAV → 管道给 paplay
-            # 不需要 -vn/-sn/-dn：dash.audio[] 返回的就是纯音频流
+            # -ss 放 -i 前：输入快速 seek，不重新下载整个流
+            cmd = ["ffmpeg", "-loglevel", "error", "-re",
+                   "-user_agent", BUILTIN_HEADERS["User-Agent"],
+                   "-headers",
+                   f"Referer: {BUILTIN_HEADERS['Referer']}\n"
+                   f"Origin: {BUILTIN_HEADERS['Origin']}\n"]
+            if self.offset > 0:
+                cmd += ["-ss", str(self.offset)]
+            cmd += ["-i", self.url,
+                    "-ac", "2", "-ar", "44100",
+                    "-c:a", "pcm_s16le",
+                    "-f", "wav", "pipe:1"]
             self.ffmpeg = subprocess.Popen(
-                ["ffmpeg", "-loglevel", "error", "-re",
-                 "-user_agent",
-                 BUILTIN_HEADERS["User-Agent"],
-                 "-headers",
-                 f"Referer: {BUILTIN_HEADERS['Referer']}\n"
-                 f"Origin: {BUILTIN_HEADERS['Origin']}\n",
-                 "-i", self.url,
-                 "-ac", "2", "-ar", "44100",
-                 "-c:a", "pcm_s16le",
-                 "-f", "wav", "pipe:1"],
+                cmd,
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             )
             self.paplay = subprocess.Popen(
@@ -230,7 +266,7 @@ class Player:
             return
         if self.paused:
             return
-        pos = time.time() - self.started_at
+        pos = self.offset + (time.time() - self.started_at)
         if self._tick_cb:
             self._tick_cb(pos, self.duration)
 
@@ -304,6 +340,14 @@ class MusicApp:
         )
         self.btn_search.pack(side="left")
 
+        # 历史（只存 ID，不缓存音频）
+        self.btn_history = tk.Button(
+            top, text="🕘 历史", font=f, bg=C["active"], fg=C["fg"],
+            activebackground=C["accent"], activeforeground="#fff",
+            relief="flat", padx=12, pady=4, command=self._show_history,
+        )
+        self.btn_history.pack(side="left", padx=(6, 0))
+
         # ── 结果列表 ──
         list_frame = tk.Frame(self.root, bg=C["card"], relief="flat")
         list_frame.pack(fill="both", expand=True, padx=12, pady=6)
@@ -335,9 +379,13 @@ class MusicApp:
         self.cur = tk.Label(bar, text="00:00", font=("Consolas", 9),
                             fg=C["muted"], bg=C["card"])
         self.cur.pack(side="left")
-        self.bar = ttk.Progressbar(bar, orient="horizontal", mode="determinate",
-                                    maximum=1000)
-        self.bar.pack(side="left", fill="x", expand=True, padx=6)
+        # 可拖拽进度条（Canvas 自绘，松开才 seek）
+        self.seek = tk.Canvas(bar, height=20, bg=C["card"], highlightthickness=0)
+        self.seek.pack(side="left", fill="x", expand=True, padx=6)
+        self.seek.bind("<Button-1>", self._seek_press)
+        self.seek.bind("<B1-Motion>", self._seek_drag)
+        self.seek.bind("<ButtonRelease-1>", self._seek_release)
+        self._seek_drag_ratio = None   # 拖动中的位置 0~1
         self.tot = tk.Label(bar, text="00:00", font=("Consolas", 9),
                             fg=C["muted"], bg=C["card"])
         self.tot.pack(side="right")
@@ -396,22 +444,36 @@ class MusicApp:
         if self.current is None:
             notify(self.root, "⚠️ 先选择歌曲", "err")
             return
-        item = self.results[self.current]
+        self._play_item(self.results[self.current])
+
+    def _play_item(self, item):
+        """播放任意条目（搜索结果或历史），只拉流不缓存"""
         self.info.configure(text=f"⏳ 加载... {item['title']}")
         self.root.update_idletasks()
 
         def work():
             try:
                 cid = _get_cid(item["bvid"])
-                # 从下拉框读音质
-                qn_map = {"64k": AUDIO_64K, "128k": AUDIO_128K, "192k": AUDIO_192K}
-                selected_qn = qn_map.get(self.qn_var.get(), PREFERRED_QN)
+                # 历史条目带固定音质；搜索条目从下拉框读
+                if item.get("qn"):
+                    selected_qn = item["qn"]
+                else:
+                    qn_map = {"64k": AUDIO_64K, "128k": AUDIO_128K, "192k": AUDIO_192K}
+                    selected_qn = qn_map.get(self.qn_var.get(), PREFERRED_QN)
                 url, actual_qn, _mime = _get_audio_url(item["bvid"], cid, prefer_qn=selected_qn)
                 qn_label = {AUDIO_192K: "192k", AUDIO_128K: "128k",
                             AUDIO_64K: "64k", AUDIO_FLAC: "FLAC"}.get(actual_qn, f"{actual_qn}")
                 self.player.load(url, _parse_dur(item["duration"]))
                 self.player.start()
                 self.info.configure(text=f"🎵 {item['title']} — {item['author']} [{qn_label}]")
+                # 只存 ID/标题/音质，不缓存音频文件
+                _save_history({
+                    "bvid": item["bvid"],
+                    "title": item["title"],
+                    "author": item.get("author", ""),
+                    "duration": item.get("duration", ""),
+                    "qn": actual_qn,
+                })
             except Exception as e:
                 self.info.configure(text=f"❌ {e}")
 
@@ -424,7 +486,7 @@ class MusicApp:
     def _stop(self):
         self.player.stop()
         self.cur.configure(text="00:00")
-        self.bar["value"] = 0
+        self._draw_seek(0)
         self.info.configure(text="已停止")
 
     def _prev(self):
@@ -446,10 +508,117 @@ class MusicApp:
             return
         self.cur.configure(text=_fmt(pos))
         self.tot.configure(text=_fmt(dur))
-        self.bar["value"] = min(1000, int(pos / dur * 1000))
+        # 拖动中不覆盖进度条显示
+        if self._seek_drag_ratio is None:
+            self._draw_seek(min(1.0, pos / dur))
 
     def _on_end(self):
         self._next()
+
+    # ── 可拖拽进度条（seek） ──
+    def _draw_seek(self, ratio):
+        """绘制进度条：轨道 + 已播放 + 进度点"""
+        c = self.seek
+        w = c.winfo_width()
+        if w < 20:
+            return
+        h = 20
+        c.delete("all")
+        ratio = max(0.0, min(1.0, ratio))
+        mid = h // 2
+        # 轨道
+        c.create_rectangle(2, mid - 2, w - 2, mid + 2, fill=C["active"], outline="")
+        # 已播放
+        if ratio > 0:
+            c.create_rectangle(2, mid - 2, 2 + (w - 4) * ratio, mid + 2,
+                               fill=C["accent"], outline="")
+        # 进度点
+        px = 2 + (w - 4) * ratio
+        c.create_oval(px - 5, mid - 5, px + 5, mid + 5,
+                      fill="#ffffff", outline=C["accent"])
+
+    def _seek_ratio(self, event):
+        """鼠标 x → 播放比例 0~1"""
+        w = self.seek.winfo_width()
+        if w < 10:
+            return 0.0
+        return max(0.0, min(1.0, (event.x - 2) / (w - 4)))
+
+    def _seek_press(self, event):
+        """按下：开始拖动，仅更新显示"""
+        if not self.player.url or self.player.duration <= 0:
+            return
+        self._seek_drag_ratio = self._seek_ratio(event)
+        self._draw_seek(self._seek_drag_ratio)
+        self.cur.configure(text=_fmt(self._seek_drag_ratio * self.player.duration))
+
+    def _seek_drag(self, event):
+        """拖动：实时更新显示"""
+        if self._seek_drag_ratio is None:
+            return
+        self._seek_drag_ratio = self._seek_ratio(event)
+        self._draw_seek(self._seek_drag_ratio)
+        self.cur.configure(text=_fmt(self._seek_drag_ratio * self.player.duration))
+
+    def _seek_release(self, event):
+        """松开：真正 seek（重启 ffmpeg 从目标位置拉流）"""
+        if self._seek_drag_ratio is None:
+            return
+        ratio = self._seek_ratio(event)
+        self._seek_drag_ratio = None
+        if not self.player.url or self.player.duration <= 0:
+            return
+        target = ratio * self.player.duration
+        self._do_seek(target)
+
+    def _do_seek(self, target):
+        """从 target 秒重新开始播放"""
+        url, dur = self.player.url, self.player.duration
+        was_paused = self.player.paused
+        self.player.stop()
+        self.player.load(url, dur, offset=target)
+        self.player.start()
+        if was_paused:
+            self.player.pause()
+
+    # ── 历史（只存 ID） ──
+    def _show_history(self):
+        """历史弹窗：双击播放"""
+        hist = _load_history()
+        if not hist:
+            notify(self.root, "暂无历史", "err")
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("🕘 播放历史")
+        win.geometry("560x420")
+        win.configure(bg=C["bg"])
+
+        lb = tk.Listbox(
+            win, bg=C["card"], fg=C["fg"],
+            selectbackground=C["active"], selectforeground=C["fg"],
+            font=("Microsoft YaHei", 10), relief="flat", activestyle="none",
+        )
+        sb = ttk.Scrollbar(win, orient="vertical", command=lb.yview)
+        lb.configure(yscrollcommand=sb.set)
+        lb.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+        sb.pack(side="right", fill="y", pady=10)
+
+        for h in hist:
+            lb.insert("end", f"  [{h.get('duration','')}]  {h.get('title','')}  —  {h.get('author','')}")
+
+        def play_selected(_e=None):
+            sel = lb.curselection()
+            if not sel:
+                return
+            item = hist[sel[0]]
+            win.destroy()
+            self._play_item(item)
+
+        lb.bind("<Double-Button-1>", play_selected)
+        tk.Button(win, text="▶ 播放选中", font=("Microsoft YaHei", 10),
+                  bg=C["accent"], fg="#fff", relief="flat", padx=16, pady=4,
+                  command=play_selected).pack(pady=(0, 10))
 
     def _poll_tick(self):
         self.player.tick()
