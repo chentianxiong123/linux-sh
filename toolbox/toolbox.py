@@ -281,11 +281,11 @@ class ToolboxApp:
             tags=tag,
         )
 
-        # 2. 高亮层（在背景之上，图标之下）
+        # 2. 高亮层（在背景之上，图标之下，独立 tag 只作用于自己）
         canvas.create_rectangle(
             x0, y0, x1, y1,
             fill="", outline="",
-            tags=tag,
+            tags=(tag, f"hl_{grid_idx}"),
         )
 
         # 3. 图标
@@ -323,8 +323,8 @@ class ToolboxApp:
         canvas.tag_bind(click_tag, "<B1-Motion>", lambda e: self._on_drag(e))
         canvas.tag_bind(click_tag, "<ButtonRelease-1>", lambda e, i=item, g=grid_idx: self._on_release(e, i, g))
         canvas.tag_bind(click_tag, "<Button-3>", lambda e, i=item: self.show_menu(e, i))
-        canvas.tag_bind(click_tag, "<Enter>", lambda e, t=tag: self.on_hover(t, True))
-        canvas.tag_bind(click_tag, "<Leave>", lambda e, t=tag: self.on_hover(t, False))
+        canvas.tag_bind(click_tag, "<Enter>", lambda e, t=f"hl_{grid_idx}": self.on_hover(t, True))
+        canvas.tag_bind(click_tag, "<Leave>", lambda e, t=f"hl_{grid_idx}": self.on_hover(t, False))
 
     def _cell_center(self, idx):
         """根据索引计算格子中心坐标"""
@@ -442,9 +442,8 @@ class ToolboxApp:
         total = len(self.items)
         
         if 0 <= dst_idx < total and dst_idx != src_idx:
-            tag = f"cell_{dst_idx}"
-            self.canvas.itemconfig(tag, fill="#2a4f7e", outline=C_ACCENT)
-            self._last_target_tag = tag
+            self.canvas.itemconfig(f"hl_{dst_idx}", fill="#2a4f7e", outline=C_ACCENT)
+            self._last_target_tag = f"hl_{dst_idx}"
 
     def _complete_drop(self, event):
         """完成拖拽：交换两个格子（局部更新）"""
@@ -472,9 +471,9 @@ class ToolboxApp:
         self.draw_cell(self.canvas, self.items[src_idx], sx, sy, src_idx)
         self.draw_cell(self.canvas, self.items[dst_idx], dx, dy, dst_idx)
         
-        # 恢复选中高亮（重绘后高亮层是空的）
+        # 恢复选中高亮（重绘后高亮层是空的，用 hl tag）
         if self._selected_idx >= 0:
-            self.canvas.itemconfig(f"cell_{self._selected_idx}", fill="#1e2f5e", outline=C_ACCENT)
+            self.canvas.itemconfig(f"hl_{self._selected_idx}", fill="#1e2f5e", outline=C_ACCENT)
         
         # 清理拖拽目标高亮残留（指向已删除的 item）
         self._last_target_tag = None
@@ -530,23 +529,23 @@ class ToolboxApp:
             return None
 
     def on_hover(self, tag, entering):
-        """悬停效果：高亮背景，不遮住图标"""
-        idx = int(tag.split("_")[1])
+        """悬停效果：只改高亮层 hl_tag，背景卡片不受影响"""
         if entering:
             self.canvas.itemconfig(tag, fill="#1e2f5e", outline=C_ACCENT)
         else:
             # 如果是选中的格子，保持高亮
+            idx = int(tag.split("_")[1])
             if self._selected_idx != idx:
                 self.canvas.itemconfig(tag, fill="", outline="")
 
     def select(self, item, idx):
-        """单击选中，保持高亮"""
+        """单击选中，保持高亮（只改高亮层）"""
         # 取消之前的选中
         if self._selected_idx >= 0:
-            self.canvas.itemconfig(f"cell_{self._selected_idx}", fill="", outline="")
+            self.canvas.itemconfig(f"hl_{self._selected_idx}", fill="", outline="")
         # 选中当前
         self._selected_idx = idx
-        self.canvas.itemconfig(f"cell_{idx}", fill="#1e2f5e", outline=C_ACCENT)
+        self.canvas.itemconfig(f"hl_{idx}", fill="#1e2f5e", outline=C_ACCENT)
 
     def show_menu(self, event, item):
         """右键菜单"""
