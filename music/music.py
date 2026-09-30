@@ -302,7 +302,6 @@ class MusicApp:
         self.current = None
         self.player = Player(on_tick=self._on_tick, on_end=self._on_end)
         self._build()
-        self._load_volume()
         self._poll_tick()
 
     def _on_close(self):
@@ -311,29 +310,18 @@ class MusicApp:
         self.root.destroy()
 
     def _build(self):
-        pad = {"padx": 14, "pady": 6}
+        pad = {"padx": 12, "pady": 6}
         f = ("Microsoft YaHei", 10)
         fb = ("Microsoft YaHei", 10, "bold")
 
-        # ── 头部标题 ──
-        head = tk.Frame(self.root, bg=C["bg"])
-        head.pack(fill="x", padx=14, pady=(12, 0))
-        tk.Label(head, text="🎵 B站音乐", font=("Microsoft YaHei", 16, "bold"),
-                 fg=C["fg"], bg=C["bg"]).pack(side="left")
-        tk.Label(head, text="搜索 · 流式播放 · 不缓存", font=("Microsoft YaHei", 9),
-                 fg=C["muted"], bg=C["bg"]).pack(side="left", padx=(10, 0), pady=(8, 0))
-        # 装饰线
-        line = tk.Frame(self.root, bg=C["accent"], height=2)
-        line.pack(fill="x", padx=14, pady=(6, 0))
-
-        # ── 搜索区（卡片） ──
-        top = tk.Frame(self.root, bg=C["card"])
+        # ── 搜索区 ──
+        top = tk.Frame(self.root, bg=C["bg"])
         top.pack(fill="x", **pad)
 
-        self.entry = tk.Entry(top, bg=C["bg"], fg=C["fg"],
+        self.entry = tk.Entry(top, bg=C["card"], fg=C["fg"],
                               insertbackground=C["fg"], font=f, relief="flat",
                               width=38)
-        self.entry.pack(side="left", fill="x", expand=True, padx=(10, 6), pady=8)
+        self.entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
         self.entry.bind("<Return>", lambda e: self._search())
 
         # 音质选择
@@ -348,7 +336,7 @@ class MusicApp:
         self.btn_search = tk.Button(
             top, text="🔍 搜索", font=fb, bg=C["accent"], fg="#fff",
             activebackground=C["accent"], activeforeground="#fff",
-            relief="flat", padx=18, pady=5, command=self._search, cursor="hand2",
+            relief="flat", padx=18, pady=4, command=self._search,
         )
         self.btn_search.pack(side="left")
 
@@ -356,40 +344,38 @@ class MusicApp:
         self.btn_history = tk.Button(
             top, text="🕘 历史", font=f, bg=C["active"], fg=C["fg"],
             activebackground=C["accent"], activeforeground="#fff",
-            relief="flat", padx=12, pady=5, command=self._show_history, cursor="hand2",
+            relief="flat", padx=12, pady=4, command=self._show_history,
         )
-        self.btn_history.pack(side="left", padx=(6, 10))
+        self.btn_history.pack(side="left", padx=(6, 0))
 
         # ── 结果列表 ──
-        list_frame = tk.Frame(self.root, bg=C["card"])
-        list_frame.pack(fill="both", expand=True, padx=14, pady=6)
+        list_frame = tk.Frame(self.root, bg=C["card"], relief="flat")
+        list_frame.pack(fill="both", expand=True, padx=12, pady=6)
 
         self.listbox = tk.Listbox(
             list_frame, bg=C["card"], fg=C["fg"],
             selectbackground=C["active"], selectforeground=C["fg"],
             font=f, relief="flat", activestyle="none",
-            highlightthickness=0, borderwidth=0,
         )
         sb = ttk.Scrollbar(list_frame, orient="vertical", command=self.listbox.yview)
         self.listbox.configure(yscrollcommand=sb.set)
-        self.listbox.pack(side="left", fill="both", expand=True, padx=8, pady=8)
-        sb.pack(side="right", fill="y", pady=8, padx=(0, 6))
+        self.listbox.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
 
         self.listbox.bind("<Double-Button-1>", self._on_play_from_list)
         self.listbox.bind("<<ListboxSelect>>", self._on_select)
 
-        # ── 播放卡片 ──
+        # ── 播放区 ──
         player = tk.Frame(self.root, bg=C["card"])
-        player.pack(fill="x", padx=14, pady=(0, 14))
+        player.pack(fill="x", padx=12, pady=(6, 12))
 
-        # 歌曲信息行
         self.info = tk.Label(player, text="未播放", font=fb,
-                             fg=C["fg"], bg=C["card"], anchor="center")
-        self.info.pack(fill="x", padx=12, pady=(12, 8))
+                             fg=C["fg"], bg=C["card"], anchor="w")
+        self.info.pack(fill="x", padx=12, pady=(8, 2))
 
-        # 进度条行
         bar = tk.Frame(player, bg=C["card"])
-        bar.pack(fill="x", padx=16, pady=(0, 2))
+        bar.pack(fill="x", padx=12, pady=(0, 4))
+
         self.cur = tk.Label(bar, text="00:00", font=("Consolas", 9),
                             fg=C["muted"], bg=C["card"])
         self.cur.pack(side="left")
@@ -404,70 +390,26 @@ class MusicApp:
                             fg=C["muted"], bg=C["card"])
         self.tot.pack(side="right")
 
-        # 音量行
-        volrow = tk.Frame(player, bg=C["card"])
-        volrow.pack(fill="x", padx=16, pady=(2, 2))
-        tk.Label(volrow, text="🔊", font=("Microsoft YaHei", 10),
-                 fg=C["muted"], bg=C["card"]).pack(side="left")
-        self.vol_scale = ttk.Scale(volrow, from_=0, to=100, command=self._on_vol)
-        self.vol_scale.pack(side="left", fill="x", expand=True, padx=8)
-        self.vol_pct = tk.Label(volrow, text="100%", font=("Consolas", 9),
-                                fg=C["muted"], bg=C["card"], width=4)
-        self.vol_pct.pack(side="right")
+        self.vol = tk.Label(player, text="🔊 音量 100%", font=("Microsoft YaHei", 9),
+                            fg=C["muted"], bg=C["card"])
+        self.vol.pack(fill="x", padx=12, pady=(0, 8))
 
-        # ── 控制按钮（图标化） ──
+        # ── 控制按钮 ──
         ctrl = tk.Frame(player, bg=C["card"])
-        ctrl.pack(fill="x", padx=16, pady=(8, 12))
+        ctrl.pack(fill="x", padx=12, pady=(4, 12))
 
         self.btn = {}
-        style = ttk.Style()
-        style.theme_use("clam")
-        style.configure("Vol.Horizontal.TScale", background=C["card"],
-                        troughcolor=C["active"], lightcolor=C["accent"],
-                        darkcolor=C["accent"], bordercolor=C["card"])
-
-        def mk(key, text, cmd, bg, big=False):
-            b = tk.Button(ctrl, text=text, font=("Microsoft YaHei", 14 if big else 12),
-                          bg=bg, fg="#fff",
+        for text, cmd, w in [("⏮ prev", self._prev, 6),
+                              ("▶ play", self._play, 8),
+                              ("⏸ pause", self._pause, 8),
+                              ("⏹ stop", self._stop, 6),
+                              ("next ⏭", self._next, 6)]:
+            b = tk.Button(ctrl, text=text, font=f, bg=C["active"], fg=C["fg"],
                           activebackground=C["accent"], activeforeground="#fff",
-                          relief="flat", width=4 if big else 3, pady=7 if big else 6,
-                          command=cmd, cursor="hand2")
+                          relief="flat", padx=12, pady=5, width=w,
+                          command=cmd)
             b.pack(side="left", expand=True, padx=3)
-            self.btn[key] = b
-
-        mk("prev", "⏮", self._prev, C["active"])
-        mk("play", "▶", self._play, C["accent"], big=True)
-        mk("pause", "⏸", self._pause, C["active"])
-        mk("stop", "⏹", self._stop, C["active"])
-        mk("next", "⏭", self._next, C["active"])
-
-    # ── 音量 ──
-    def _on_vol(self, v):
-        """音量滑块 → PulseAudio"""
-        pct = max(0, min(100, int(float(v))))
-        self.vol_pct.configure(text=f"{pct}%")
-        try:
-            subprocess.Popen(
-                ["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{pct}%"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            pass
-
-    def _load_volume(self):
-        """启动时读取当前系统音量"""
-        try:
-            out = subprocess.run(
-                ["pactl", "get-sink-volume", "@DEFAULT_SINK@"],
-                capture_output=True, text=True, timeout=3,
-            ).stdout
-            m = re.search(r"(\d+)%", out or "")
-            if m:
-                v = int(m.group(1))
-                self.vol_scale.set(min(100, v))
-                self.vol_pct.configure(text=f"{min(100, v)}%")
-        except Exception:
-            pass
+            self.btn[cmd.__name__.lstrip("_")] = b
 
     # ── 事件 ──
     def _search(self):
@@ -524,7 +466,7 @@ class MusicApp:
                 self.player.load(url, _parse_dur(item["duration"]))
                 self.player.start()
                 self.info.configure(text=f"🎵 {item['title']} — {item['author']} [{qn_label}]")
-                self.btn["pause"].configure(text="⏸", bg=C["active"])
+                # 只存 ID/标题/音质，不缓存音频文件
                 _save_history({
                     "bvid": item["bvid"],
                     "title": item["title"],
@@ -538,21 +480,14 @@ class MusicApp:
         threading.Thread(target=work, daemon=True).start()
 
     def _pause(self):
-        if not self.player.url:
-            return
-        self.player.toggle()
-        # 按钮状态切换
-        if self.player.paused:
-            self.btn["pause"].configure(text="▶", bg=C["ok"])
-        else:
-            self.btn["pause"].configure(text="⏸", bg=C["active"])
+        if self.player.url:
+            self.player.toggle()
 
     def _stop(self):
         self.player.stop()
         self.cur.configure(text="00:00")
         self._draw_seek(0)
         self.info.configure(text="已停止")
-        self.btn["pause"].configure(text="⏸", bg=C["active"])
 
     def _prev(self):
         if self.current is not None and self.current > 0:
