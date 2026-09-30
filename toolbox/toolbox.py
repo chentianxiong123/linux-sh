@@ -339,12 +339,10 @@ class ToolboxApp:
         self._page = 0
         self._selected_idx = -1
         self._last_target_tag = None
-        has_canvas = hasattr(self, "canvas")
-        if has_canvas:
-            self.draw_grid()
-        if hasattr(self, "_empty_label") and self._empty_label:
-            self._empty_label.destroy()
-            self._empty_label = None
+        # 无条件 draw_grid：空分类分支会 del canvas，若这里按 has_canvas
+        # 判断，从空分类切回有内容的分类就不重建画布 → 图标全消失。
+        # draw_grid 内部自处理空/非空、canvas 与空标签的重建。
+        self.draw_grid()
 
     def on_drop(self, event):
         """从外部拖入 .desktop 文件：复制进持久化目录 + 刷新网格"""
