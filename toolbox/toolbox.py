@@ -195,7 +195,7 @@ class ToolboxApp:
         self.root.wm_protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.items = []
-        self._selected_tag = None  # 当前选中的格子
+        self._selected_idx = -1  # 当前选中的格子索引（-1 = 无）
         
         # 拖拽状态
         self._drag_item = None
@@ -384,8 +384,7 @@ class ToolboxApp:
                 self._last_click_item = None
             else:
                 # 单击：选中
-                tag = f"cell_{grid_idx}"
-                self.select(item, tag)
+                self.select(item, grid_idx)
                 self._last_click_time = now
                 self._last_click_item = item
         
@@ -468,6 +467,12 @@ class ToolboxApp:
         # 交换列表
         self.items[src_idx], self.items[dst_idx] = self.items[dst_idx], self.items[src_idx]
         
+        # 选中状态跟着 item 走：如果选中的是交换的两个格子之一，更新索引
+        if self._selected_idx == src_idx:
+            self._selected_idx = dst_idx
+        elif self._selected_idx == dst_idx:
+            self._selected_idx = src_idx
+        
         # 局部更新：只删除并重绘这两个格子（位置由索引算，不会错）
         self.canvas.delete(f"cell_{src_idx}", f"click_{src_idx}", f"cell_{dst_idx}", f"click_{dst_idx}")
         
@@ -475,6 +480,13 @@ class ToolboxApp:
         dx, dy = self._cell_center(dst_idx)
         self.draw_cell(self.canvas, self.items[src_idx], sx, sy, src_idx)
         self.draw_cell(self.canvas, self.items[dst_idx], dx, dy, dst_idx)
+        
+        # 恢复选中高亮（重绘后高亮层是空的）
+        if self._selected_idx >= 0:
+            self.canvas.itemconfig(f"cell_{self._selected_idx}", fill="#1e2f5e", outline=C_ACCENT)
+        
+        # 清理拖拽目标高亮残留（指向已删除的 item）
+        self._last_target_tag = None
         
         # 保存顺序
         self._save_order()
@@ -528,21 +540,22 @@ class ToolboxApp:
 
     def on_hover(self, tag, entering):
         """悬停效果：高亮背景，不遮住图标"""
+        idx = int(tag.split("_")[1])
         if entering:
             self.canvas.itemconfig(tag, fill="#1e2f5e", outline=C_ACCENT)
         else:
-            # 如果当前是选中状态，保持高亮
-            if not self._selected_tag or self._selected_tag != tag:
+            # 如果是选中的格子，保持高亮
+            if self._selected_idx != idx:
                 self.canvas.itemconfig(tag, fill="", outline="")
 
-    def select(self, item, tag):
+    def select(self, item, idx):
         """单击选中，保持高亮"""
         # 取消之前的选中
-        if self._selected_tag:
-            self.canvas.itemconfig(self._selected_tag, fill="", outline="")
+        if self._selected_idx >= 0:
+            self.canvas.itemconfig(f"cell_{self._selected_idx}", fill="", outline="")
         # 选中当前
-        self._selected_tag = tag
-        self.canvas.itemconfig(tag, fill="#1e2f5e", outline=C_ACCENT)
+        self._selected_idx = idx
+        self.canvas.itemconfig(f"cell_{idx}", fill="#1e2f5e", outline=C_ACCENT)
 
     def show_menu(self, event, item):
         """右键菜单"""
