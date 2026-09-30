@@ -624,9 +624,10 @@ class MusicApp:
         """按当前模式填充共用列表"""
         self.listbox.delete(0, "end")
         for it in self._source:
+            tag = f"[{it.get('typename','')}]" if it.get("typename") else ""
             self.listbox.insert(
                 "end",
-                f"  [{_fmt_dur(it.get('duration',''))}][{it.get('typename','')}]  {it.get('title','')}  —  {it.get('author','')}",
+                f"  [{_fmt_dur(it.get('duration',''))}]{tag}  {it.get('title','')}  —  {it.get('author','')}",
             )
         if self._source:
             self.listbox.selection_set(0)
