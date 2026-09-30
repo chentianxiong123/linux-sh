@@ -599,7 +599,7 @@ class ToolboxApp:
         self.canvas.itemconfig(f"hl_{idx}", fill="#1e2f5e", outline=C_ACCENT)
 
     def show_menu(self, event, item):
-        """右键菜单：极简两项"""
+        """右键菜单：极简两项，失去焦点自动消失"""
         menu = tk.Menu(self.root, tearoff=0)
         
         # 复制地址
@@ -609,8 +609,11 @@ class ToolboxApp:
         # 删除此工具
         menu.add_command(label="🗑 删除此工具", command=lambda: self.delete_item(item))
         
-        # 在鼠标位置显示菜单
-        menu.post(event.x_root, event.y_root)
+        # tk_popup：点击菜单外自动关闭（post 不会）
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
 
     def copy_path(self, item):
         """复制 .desktop 文件路径到剪贴板"""
