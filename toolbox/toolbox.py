@@ -225,17 +225,39 @@ def parse_desktop(file_path):
     }
 
 
+def _system_icon_path(name, size=64):
+    """用系统官方(Gtk.IconTheme)解析图标名 → 返回真实文件路径（跟桌面同一套）"""
+    try:
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk
+        ic = Gtk.IconTheme.get_default().lookup_icon(name, size, 0)
+        if ic:
+            return ic.get_filename()
+    except Exception:
+        pass
+    return None
+
+
 def find_icon(icon_name):
-    """按桌面图标主题规范查找图标（同 KDE 行为）：当前主题→继承链→hicolor→pixmaps
-    返回 PIL Image 或 None；SVG 用 rsvg-convert 转 PNG"""
+    """图标查找（以真实桌面为准）：
+    1. Icon 是完整路径 → 直接用
+    2. 系统 Gtk.IconTheme 官方解析 → 拿真实路径
+    3. 兜底 Freedesktop 规范解析
+    """
     if not icon_name or not Image:
         return None
-    # 完整路径直接加载
+    # 完整路径直接用
     if os.path.isfile(icon_name):
         return _load_image(icon_name)
-    # 命名 → 规范解析
+    # 系统官方解析拿真实路径
+    p = _system_icon_path(icon_name)
+    if p and os.path.isfile(p):
+        img = _load_image(p)
+        if img:
+            return img
+    # 兜底：Freedesktop 规范解析（含单复数变体）
     variants = [icon_name]
-    # 单复数兜底（如 shortcuts → shortcut）
     variants.append(icon_name[:-1] if icon_name.endswith("s") else icon_name + "s")
     for name in variants:
         p = _resolve_icon(name)
