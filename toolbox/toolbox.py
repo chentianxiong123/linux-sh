@@ -365,6 +365,7 @@ class ToolboxApp:
         self._filter_btns = {}
         self._selected_idx = -1  # 当前选中的格子索引（-1 = 无）
         self._active_menu = None  # 当前打开的右键菜单
+        self._name_tip = None     # 完整名字提示（单击显示）
         
         # 点击窗口任意处关闭右键菜单
         self.root.bind("<Button-1>", lambda e: self._close_menu())
@@ -446,6 +447,7 @@ class ToolboxApp:
 
     def _apply_filter(self):
         """按当前分类过滤 items 并重绘；同时重置选中/分页"""
+        self._close_name_tip()
         self.items = [it for it in self._all_items
                       if it.get("ecosystem") == self._filter]
         self._page = 0
@@ -764,9 +766,41 @@ class ToolboxApp:
             self._drag_item = None
             self._is_dragging = False
         
-        # 单击：选中（双击由 Double-Button-1 处理）
+        # 单击：选中（双击由 Double-Button-1 处理）+ 显示完整名字提示
         if not was_dragging:
             self.select(item, grid_idx)
+            self._show_name_tip(item, event)
+
+    def _close_name_tip(self):
+        """关闭完整名字提示"""
+        if getattr(self, "_name_tip", None) is not None:
+            try:
+                self._name_tip.destroy()
+            except Exception:
+                pass
+            self._name_tip = None
+
+    def _show_name_tip(self, item, event):
+        """单击格子：若名字被截断，在鼠标下方浮出完整名字"""
+        self._close_name_tip()
+        if not item or len(item.get("name", "")) <= 10:
+            return  # 没被截断，不用提示
+        try:
+            tip = tk.Toplevel(self.root)
+            tip.overrideredirect(True)
+            tip.attributes("-topmost", True)
+            fr = tk.Frame(tip, bg="#2a2a4a", bd=1, relief="solid")
+            fr.pack(fill="both", expand=True)
+            tk.Label(
+                fr, text=item["name"], bg="#2a2a4a", fg="#fff",
+                font=("Microsoft YaHei", 9), padx=8, pady=4, anchor="w",
+            ).pack(fill="both", expand=True)
+            x = event.x_root if event is not None else PADDING
+            y = event.y_root if event is not None else PADDING
+            tip.geometry(f"+{x + 12}+{y + 14}")
+            self._name_tip = tip
+        except Exception:
+            self._name_tip = None
 
     def _create_drag_visual(self, event):
         """创建拖拽视觉（半透明图标跟随鼠标）"""
@@ -954,13 +988,14 @@ class ToolboxApp:
         menu.post(event.x_root, event.y_root)
 
     def _close_menu(self):
-        """关闭当前打开的右键菜单"""
+        """关闭当前打开的右键菜单 + 完整名字提示"""
         if self._active_menu:
             try:
                 self._active_menu.unpost()
             except Exception:
                 pass
             self._active_menu = None
+        self._close_name_tip()
 
     def copy_path(self, item):
         """复制 .desktop 文件路径到剪贴板"""
