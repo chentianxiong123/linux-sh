@@ -188,6 +188,7 @@ class Player:
         self.offset = 0.0          # seek 起点（秒）
         self.started_at = 0.0
         self.paused = False
+        self._pause_started = 0.0  # 本次暂停开始的时间（计时补偿用）
         self._tick_cb = on_tick
         self._end_cb = on_end
         self.lock = threading.Lock()
@@ -205,8 +206,11 @@ class Player:
             if not self.url or self.ffmpeg is not None:
                 return
             # ffmpeg 拉流 → 解码 → 转 WAV PCM → 管道给 paplay
+            # 注意：不能用 -re！它按系统时钟节流，SIGSTOP 暂停后时钟跳变
+            #       导致恢复播放时 ffmpeg 判定输入过期直接退出（僵尸进程）
+            # 无 -re：靠管道缓冲阻塞自然限速，SIGSTOP/SIGCONT 稳定工作
             # -ss 放 -i 前：输入快速 seek，不重新下载整个流
-            cmd = ["ffmpeg", "-loglevel", "error", "-re",
+            cmd = ["ffmpeg", "-loglevel", "error",
                    "-user_agent", BUILTIN_HEADERS["User-Agent"],
                    "-headers",
                    f"Referer: {BUILTIN_HEADERS['Referer']}\n"
@@ -228,6 +232,10 @@ class Player:
             self.ffmpeg.stdout = None
             self.started_at = time.time()
 
+    def is_playing(self):
+        """进程真的在跑才是播放中（ffmpeg 退出后属性非 None 但 poll 非 None）"""
+        return self.ffmpeg is not None and self.ffmpeg.poll() is None
+
     def pause(self):
         with self.lock:
             if not self.ffmpeg or self.paused:
@@ -236,6 +244,7 @@ class Player:
                 if p.poll() is None:
                     os.kill(p.pid, signal.SIGSTOP)
             self.paused = True
+            self._pause_started = time.time()
 
     def resume(self):
         with self.lock:
@@ -244,6 +253,8 @@ class Player:
             for p in (self.ffmpeg, self.paplay):
                 if p.poll() is None:
                     os.kill(p.pid, signal.SIGCONT)
+            # 补偿暂停时长：started_at 前移，进度不跳变
+            self.started_at += time.time() - self._pause_started
             self.paused = False
 
     def toggle(self):
@@ -501,7 +512,7 @@ class MusicApp:
                 self.player.load(url, _parse_dur(item["duration"]))
                 self.player.start()
                 self.info.configure(text=f"🎵 {item['title']} — {item['author']} [{qn_label}]")
-                self.btn["play"].configure(text="▶ 播放")
+                self.btn["play"].configure(text="⏸ 暂停")
             except Exception as e:
                 self.info.configure(text=f"❌ {e}")
 
@@ -509,12 +520,12 @@ class MusicApp:
 
     def _play_toggle(self):
         """播放/暂停切换（一个按钮）"""
-        if self.player.url and self.player.ffmpeg is not None:
+        if self.player.is_playing():
             self.player.toggle()
             if self.player.paused:
-                self.btn["play"].configure(text="⏸ 暂停")
+                self.btn["play"].configure(text="▶ 继续")
             else:
-                self.btn["play"].configure(text="▶ 播放")
+                self.btn["play"].configure(text="⏸ 暂停")
         else:
             self._play()
 
@@ -580,6 +591,8 @@ class MusicApp:
 
     def _on_end(self):
         """一曲结束：按播放模式切换下一曲"""
+        # 播放已结束，按钮复位
+        self.btn["play"].configure(text="▶ 播放")
         n = len(self._source)
         if n <= 0:
             return
