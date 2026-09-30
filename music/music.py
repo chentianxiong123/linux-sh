@@ -3,16 +3,15 @@
 
 架构：
   Tkinter GUI  →  B站 API (search / view / playurl)
-               →  ffmpeg -vn -f wav pipe  →  paplay
-               →  subprocess SIGSTOP/SIGCONT 暂停/继续
+               →  mpv 无窗口播放（IPC 控制暂停/seek）
 
-依赖：requests, ffmpeg, paplay (已在系统)
+依赖：requests, mpv (apt install mpv)
 """
 
 import os
 import json
 import re
-import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -181,11 +180,14 @@ def _get_audio_url(bvid, cid, prefer_qn=PREFERRED_QN):
     return url, int(a.get("id", 0)), a.get("mimeType", "audio/mp4")
 
 
-# ── 播放器（ffmpeg → paplay） ───────────────────────────
+# ── 播放器（mpv 无窗口 + IPC 控制） ─────────────────
+# mpv 替代 ffmpeg+paplay：
+#   1. 暂停/seek 是 mpv 内部原子操作，立即生效无缓冲残留
+#   2. seek 不需要重启进程（原生 seek）
+#   3. 解码/网络/断线重连都由 mpv 处理
 class Player:
     def __init__(self, on_tick=None, on_end=None):
-        self.ffmpeg = None
-        self.paplay = None
+        self.mpv = None
         self.url = ""
         self.duration = 0
         self.offset = 0.0          # seek 起点（秒）
@@ -194,8 +196,47 @@ class Player:
         self._pause_started = 0.0  # 本次暂停开始的时间（计时补偿用）
         self._tick_cb = on_tick
         self._end_cb = on_end
-        self.lock = threading.Lock()
+        self._ipc_path = f"/tmp/music-mpv-{os.getpid()}.sock"
 
+    # ── IPC（mpv input-ipc-server 用 JSON 协议） ──
+    def _ipc(self, cmd):
+        """发送 JSON 命令（fire-and-forget，微秒级）"""
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(0.5)
+            s.connect(self._ipc_path)
+            s.sendall((json.dumps({"command": cmd}) + "\n").encode())
+            s.close()
+        except Exception:
+            pass
+
+    def _ipc_reply(self, cmd):
+        """发送 JSON 命令并读应答（查询用）"""
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(0.5)
+            s.connect(self._ipc_path)
+            s.sendall((json.dumps({"command": cmd}) + "\n").encode())
+            time.sleep(0.1)
+            s.settimeout(0.3)
+            resp = b""
+            try:
+                while True:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    resp += chunk
+            except socket.timeout:
+                pass
+            s.close()
+            try:
+                return json.loads(resp.decode())
+            except Exception:
+                return None
+        except Exception:
+            return None
+
+    # ── 生命周期 ──
     def load(self, url, duration, offset=0.0):
         self.stop()
         self.url = url
@@ -205,60 +246,59 @@ class Player:
         self.started_at = 0.0
 
     def start(self):
-        with self.lock:
-            if not self.url or self.ffmpeg is not None:
-                return
-            # ffmpeg 拉流 → 解码 → 转 WAV PCM → 管道给 paplay
-            # 注意：不能用 -re！它按系统时钟节流，SIGSTOP 暂停后时钟跳变
-            #       导致恢复播放时 ffmpeg 判定输入过期直接退出（僵尸进程）
-            # 无 -re：靠管道缓冲阻塞自然限速，SIGSTOP/SIGCONT 稳定工作
-            # -ss 放 -i 前：输入快速 seek，不重新下载整个流
-            cmd = ["ffmpeg", "-loglevel", "error",
-                   "-user_agent", BUILTIN_HEADERS["User-Agent"],
-                   "-headers",
-                   f"Referer: {BUILTIN_HEADERS['Referer']}\n"
-                   f"Origin: {BUILTIN_HEADERS['Origin']}\n"]
-            if self.offset > 0:
-                cmd += ["-ss", str(self.offset)]
-            cmd += ["-i", self.url,
-                    "-ac", "2", "-ar", "44100",
-                    "-c:a", "pcm_s16le",
-                    "-f", "wav", "pipe:1"]
-            self.ffmpeg = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            )
-            self.paplay = subprocess.Popen(
-                ["paplay"], stdin=self.ffmpeg.stdout,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            self.ffmpeg.stdout = None
-            self.started_at = time.time()
+        """启动 mpv 无窗口播放"""
+        if not self.url or self.mpv is not None:
+            return
+        try:
+            if os.path.exists(self._ipc_path):
+                os.unlink(self._ipc_path)
+        except OSError:
+            pass
 
-    def is_playing(self):
-        """进程真的在跑才是播放中（ffmpeg 退出后属性非 None 但 poll 非 None）"""
-        return self.ffmpeg is not None and self.ffmpeg.poll() is None
+        cmd = [
+            "mpv", "--no-video", "--no-terminal", "--no-audio-display",
+            "--input-ipc-server=" + self._ipc_path,
+            "--audio-buffer=0.2",
+            "--http-header-fields=Referer: https://search.bilibili.com/, "
+            "Origin: https://search.bilibili.com, "
+            f"Cookie: buvid3={uuid.uuid4()}, "
+            "Accept: application/json, text/plain, */*",
+            "--user-agent=" + BUILTIN_HEADERS["User-Agent"],
+        ]
+        if self.offset > 0:
+            cmd.append(f"--start={self.offset}")
+        cmd.append(self.url)
+
+        self.mpv = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        # 等 IPC socket 就绪
+        for _ in range(50):
+            if self.mpv.poll() is not None or os.path.exists(self._ipc_path):
+                break
+            time.sleep(0.1)
+        self.started_at = time.time()
 
     def pause(self):
-        with self.lock:
-            if not self.ffmpeg or self.paused:
-                return
-            for p in (self.ffmpeg, self.paplay):
-                if p.poll() is None:
-                    os.kill(p.pid, signal.SIGSTOP)
-            self.paused = True
-            self._pause_started = time.time()
+        """暂停：mpv 内部原子暂停，立即静音无缓冲残留"""
+        if self.mpv is None or self.paused:
+            return
+        self._ipc(["set_property", "pause", True])
+        self.paused = True
+        self._pause_started = time.time()
 
     def resume(self):
-        with self.lock:
-            if not self.ffmpeg or not self.paused:
-                return
-            for p in (self.ffmpeg, self.paplay):
-                if p.poll() is None:
-                    os.kill(p.pid, signal.SIGCONT)
-            # 补偿暂停时长：started_at 前移，进度不跳变
+        if self.mpv is None or not self.paused:
+            return
+        self._ipc(["set_property", "pause", False])
+        # 用 mpv 真实位置校准，彻底消除估算误差
+        r = self._ipc_reply(["get_property", "time-pos"])
+        if r and r.get("data") is not None:
+            self.offset = float(r["data"])
+            self.started_at = time.time()
+        else:
             self.started_at += time.time() - self._pause_started
-            self.paused = False
+        self.paused = False
 
     def toggle(self):
         if self.paused:
@@ -266,24 +306,38 @@ class Player:
         else:
             self.pause()
 
+    def seek(self, target):
+        """跳转：mpv 内部 seek，不重启进程"""
+        if self.mpv is not None and self.mpv.poll() is None:
+            self._ipc(["seek", target, "absolute"])
+        self.offset = target
+        self.started_at = time.time()
+
     def stop(self):
-        with self.lock:
-            for p in (self.paplay, self.ffmpeg):
-                if p and p.poll() is None:
-                    try:
-                        # 先恢复（如果之前被 SIGSTOP 暂停过）
-                        os.kill(p.pid, signal.SIGCONT)
-                        # 再杀掉
-                        os.kill(p.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-            self.ffmpeg = None
-            self.paplay = None
-            self.paused = False
-            self.started_at = 0.0
+        if self.mpv is not None:
+            if self.mpv.poll() is None:
+                self._ipc(["quit"])
+                try:
+                    self.mpv.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.mpv.kill()
+            self.mpv = None
+        try:
+            if os.path.exists(self._ipc_path):
+                os.unlink(self._ipc_path)
+        except OSError:
+            pass
+        self.url = ""
+        self.paused = False
+        self.started_at = 0.0
+        self.offset = 0.0
+
+    def is_playing(self):
+        return self.mpv is not None and self.mpv.poll() is None
 
     def tick(self):
-        if not self.ffmpeg or self.ffmpeg.poll() is not None:
+        """定时上报播放位置"""
+        if self.mpv is None or self.mpv.poll() is not None:
             if self.url and self._end_cb:
                 self._end_cb()
             return
@@ -659,7 +713,7 @@ class MusicApp:
         self.cur.configure(text=_fmt(self._seek_drag_ratio * self.player.duration))
 
     def _seek_release(self, event):
-        """松开：真正 seek（重启 ffmpeg 从目标位置拉流）"""
+        """松开：真正 seek（mpv 原生跳转）"""
         if self._seek_drag_ratio is None:
             return
         ratio = self._seek_ratio(event)
@@ -670,13 +724,9 @@ class MusicApp:
         self._do_seek(target)
 
     def _do_seek(self, target):
-        """从 target 秒重新开始播放"""
-        url, dur = self.player.url, self.player.duration
-        was_paused = self.player.paused
-        self.player.stop()
-        self.player.load(url, dur, offset=target)
-        self.player.start()
-        if was_paused:
+        """跳转：mpv 原生 seek，不重启进程"""
+        self.player.seek(target)
+        if self.player.paused:
             self.player.pause()
 
     def _poll_tick(self):
