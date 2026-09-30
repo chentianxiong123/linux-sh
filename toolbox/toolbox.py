@@ -247,6 +247,10 @@ class ToolboxApp:
         canvas_w = GRID_COLS * CELL_W + (GRID_COLS + 1) * PADDING
         canvas_h = rows * CELL_H + (rows + 1) * PADDING
 
+        # 销毁旧 canvas
+        if hasattr(self, 'canvas'):
+            self.canvas.destroy()
+
         self.canvas = tk.Canvas(
             self.root,
             width=canvas_w,
