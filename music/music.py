@@ -303,12 +303,15 @@ class MusicApp:
     def __init__(self, root):
         self.root = root
         self.root.title("B站音乐")
-        self.root.geometry("720x620")
+        self.root.geometry("900x600")   # 默认横向更宽
         self.root.configure(bg=C["bg"])
         self.root.wm_protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.results = []
         self.current = None
+        self._mode = "search"        # 列表模式: search / fav
+        self._source = self.results  # 当前列表数据源（搜索/收藏共用）
+        self._play_mode = "order"    # 播放模式: order循环 / random随机 / single单曲
         self.player = Player(on_tick=self._on_tick, on_end=self._on_end)
         self._build()
         self._poll_tick()
@@ -349,11 +352,11 @@ class MusicApp:
         )
         self.btn_search.pack(side="left")
 
-        # 收藏夹（只存 ID，不缓存音频）
+        # 收藏夹（切到收藏模式，与搜索共用列表）
         self.btn_favs = tk.Button(
             top, text="★ 收藏夹", font=f, bg=C["active"], fg=C["fg"],
             activebackground=C["accent"], activeforeground="#fff",
-            relief="flat", padx=12, pady=4, command=self._show_favs,
+            relief="flat", padx=12, pady=4, command=self._toggle_favs,
         )
         self.btn_favs.pack(side="left", padx=(6, 0))
 
@@ -403,25 +406,25 @@ class MusicApp:
                             fg=C["muted"], bg=C["card"])
         self.vol.pack(fill="x", padx=12, pady=(0, 8))
 
-        # ── 控制按钮（统一等宽，均匀分布） ──
+        # ── 控制按钮（统一等宽：播放模式 / 播放暂停 / 收藏） ──
         ctrl = tk.Frame(player, bg=C["card"])
         ctrl.pack(fill="x", padx=12, pady=(4, 12))
 
         self.btn = {}
-        for key, text, cmd in [("prev", "⏮ 上首", self._prev),
+        for key, text, cmd in [("mode", "🔁 循环", self._cycle_mode),
                                ("play", "▶ 播放", self._play_toggle),
-                               ("fav", "★ 收藏", self._fav_current),
-                               ("next", "下首 ⏭", self._next)]:
+                               ("fav", "☆ 收藏", self._fav_toggle)]:
             bg = C["accent"] if key == "play" else C["active"]
             b = tk.Button(ctrl, text=text, font=f, bg=bg, fg="#fff",
                           activebackground=C["accent"], activeforeground="#fff",
-                          relief="flat", width=8, pady=5,
+                          relief="flat", width=10, pady=5,
                           command=cmd, cursor="hand2")
             b.pack(side="left", expand=True, padx=4)
             self.btn[key] = b
 
     # ── 事件 ──
     def _search(self):
+        """搜索：切回搜索模式，填充共用列表"""
         kw = self.entry.get().strip()
         if not kw:
             return
@@ -430,30 +433,53 @@ class MusicApp:
         except Exception as e:
             notify(self.root, f"❌ {e}", "err")
             return
-        self.listbox.delete(0, "end")
-        for r in self.results:
-            self.listbox.insert("end",
-                                f"  [{r['duration']}]  {r['title']}  —  {r['author']}")
+        self._mode = "search"
+        self._source = self.results
+        self._fill_list()
         if self.results:
-            self.listbox.selection_set(0)
             notify(self.root, f"✅ 找到 {len(self.results)} 首")
         else:
             notify(self.root, "⚠️ 无结果", "err")
+
+    def _toggle_favs(self):
+        """收藏夹：切到收藏模式（与搜索共用列表）"""
+        self._mode = "fav"
+        self._source = _load_favs()
+        self._fill_list()
+        if not self._source:
+            notify(self.root, "收藏夹为空", "err")
+
+    def _fill_list(self):
+        """按当前模式填充共用列表"""
+        self.listbox.delete(0, "end")
+        for it in self._source:
+            self.listbox.insert(
+                "end",
+                f"  [{it.get('duration','')}]  {it.get('title','')}  —  {it.get('author','')}",
+            )
+        if self._source:
+            self.listbox.selection_set(0)
+            self.current = 0
+            self._update_fav_btn()
+        else:
+            self.current = None
 
     def _on_select(self, _event=None):
         sel = self.listbox.curselection()
         if sel:
             self.current = sel[0]
+            self._update_fav_btn()
 
     def _on_play_from_list(self, _event=None):
-        if self.current is not None:
-            self._play()
+        """双击：与播放按钮走同一套状态"""
+        self._play()
 
     def _play(self):
-        if self.current is None:
+        """播放当前选中（双击/播放按钮共享）"""
+        if self.current is None or not self._source:
             notify(self.root, "⚠️ 先选择歌曲", "err")
             return
-        self._play_item(self.results[self.current])
+        self._play_item(self._source[self.current])
 
     def _play_item(self, item):
         """播放任意条目（搜索结果或历史），只拉流不缓存"""
@@ -492,36 +518,56 @@ class MusicApp:
         else:
             self._play()
 
-    def _fav_current(self):
-        """收藏当前选中的歌曲（只存 ID）"""
-        if self.current is None:
+    def _cycle_mode(self):
+        """播放模式循环：顺序 → 随机 → 单曲"""
+        modes = [("order", "🔁 循环"), ("random", "🔀 随机"), ("single", "🔂 单曲")]
+        names = [m[0] for m in modes]
+        idx = names.index(self._play_mode)
+        self._play_mode = modes[(idx + 1) % len(modes)][0]
+        self.btn["mode"].configure(text=modes[(idx + 1) % len(modes)][1])
+        notify(self.root, f"播放模式: {modes[(idx + 1) % len(modes)][1]}")
+
+    def _fav_toggle(self):
+        """收藏/取消收藏当前歌曲（共享状态）"""
+        if self.current is None or not self._source:
             notify(self.root, "⚠️ 先选择歌曲", "err")
             return
-        item = self.results[self.current]
-        qn_map = {"64k": AUDIO_64K, "128k": AUDIO_128K, "192k": AUDIO_192K}
-        qn = qn_map.get(self.qn_var.get(), PREFERRED_QN)
-        _save_fav({
-            "bvid": item["bvid"],
-            "title": item["title"],
-            "author": item.get("author", ""),
-            "duration": item.get("duration", ""),
-            "qn": qn,
-        })
-        notify(self.root, f"★ 已收藏: {item['title']}")
+        item = self._source[self.current]
+        bvid = item["bvid"]
+        favs = _load_favs()
+        already = any(f.get("bvid") == bvid for f in favs)
 
-    def _prev(self):
-        if self.current is not None and self.current > 0:
-            self.current -= 1
-            self.listbox.selection_clear(0, "end")
-            self.listbox.selection_set(self.current)
-            self._play()
+        if self._mode == "fav":
+            # 收藏夹模式：删除当前收藏
+            _remove_fav(bvid)
+            self._source = _load_favs()
+            self._fill_list()
+            notify(self.root, "已取消收藏")
+        elif already:
+            notify(self.root, "★ 已在收藏夹")
+        else:
+            qn_map = {"64k": AUDIO_64K, "128k": AUDIO_128K, "192k": AUDIO_192K}
+            qn = qn_map.get(self.qn_var.get(), PREFERRED_QN)
+            _save_fav({
+                "bvid": bvid,
+                "title": item["title"],
+                "author": item.get("author", ""),
+                "duration": item.get("duration", ""),
+                "qn": qn,
+            })
+            self._update_fav_btn()
+            notify(self.root, f"★ 已收藏: {item['title']}")
 
-    def _next(self):
-        if self.current is not None and self.current < len(self.results) - 1:
-            self.current += 1
-            self.listbox.selection_clear(0, "end")
-            self.listbox.selection_set(self.current)
-            self._play()
+    def _update_fav_btn(self):
+        """根据当前歌曲收藏状态刷新收藏按钮"""
+        if self.current is None or not self._source:
+            return
+        item = self._source[self.current]
+        favs = _load_favs()
+        if any(f.get("bvid") == item.get("bvid") for f in favs):
+            self.btn["fav"].configure(text="★ 已收藏", bg=C["ok"])
+        else:
+            self.btn["fav"].configure(text="☆ 收藏", bg=C["active"])
 
     def _on_tick(self, pos, dur):
         if dur <= 0:
@@ -533,7 +579,23 @@ class MusicApp:
             self._draw_seek(min(1.0, pos / dur))
 
     def _on_end(self):
-        self._next()
+        """一曲结束：按播放模式切换下一曲"""
+        n = len(self._source)
+        if n <= 0:
+            return
+        if self._play_mode == "single":
+            self._play()  # 单曲循环：重播当前
+        elif self._play_mode == "random":
+            import random
+            self.current = random.randrange(n)
+            self.listbox.selection_clear(0, "end")
+            self.listbox.selection_set(self.current)
+            self._play()
+        else:  # order：顺序循环，末尾回到开头
+            self.current = (self.current + 1) % n
+            self.listbox.selection_clear(0, "end")
+            self.listbox.selection_set(self.current)
+            self._play()
 
     # ── 可拖拽进度条（seek） ──
     def _draw_seek(self, ratio):
@@ -600,60 +662,6 @@ class MusicApp:
         self.player.start()
         if was_paused:
             self.player.pause()
-
-    # ── 收藏夹（只存 ID） ──
-    def _show_favs(self):
-        """收藏夹弹窗：双击播放，选中可删除"""
-        favs = _load_favs()
-        if not favs:
-            notify(self.root, "收藏夹为空", "err")
-            return
-
-        win = tk.Toplevel(self.root)
-        win.title("★ 收藏夹")
-        win.geometry("560x420")
-        win.configure(bg=C["bg"])
-
-        lb = tk.Listbox(
-            win, bg=C["card"], fg=C["fg"],
-            selectbackground=C["active"], selectforeground=C["fg"],
-            font=("Microsoft YaHei", 10), relief="flat", activestyle="none",
-        )
-        sb = ttk.Scrollbar(win, orient="vertical", command=lb.yview)
-        lb.configure(yscrollcommand=sb.set)
-        lb.pack(side="left", fill="both", expand=True, padx=10, pady=10)
-        sb.pack(side="right", fill="y", pady=10)
-
-        for f in favs:
-            lb.insert("end", f"  [{f.get('duration','')}]  {f.get('title','')}  —  {f.get('author','')}")
-
-        def play_selected(_e=None):
-            sel = lb.curselection()
-            if not sel:
-                return
-            item = favs[sel[0]]
-            win.destroy()
-            self._play_item(item)
-
-        def del_selected():
-            sel = lb.curselection()
-            if not sel:
-                return
-            bvid = favs[sel[0]].get("bvid")
-            _remove_fav(bvid)
-            favs.pop(sel[0])
-            lb.delete(sel[0])
-            notify(self.root, "已取消收藏")
-
-        lb.bind("<Double-Button-1>", play_selected)
-        btns = tk.Frame(win, bg=C["bg"])
-        btns.pack(fill="x", padx=10, pady=(0, 10))
-        tk.Button(btns, text="▶ 播放", font=("Microsoft YaHei", 10),
-                  bg=C["accent"], fg="#fff", relief="flat", padx=16, pady=4,
-                  command=play_selected).pack(side="left", expand=True)
-        tk.Button(btns, text="🗑 删除", font=("Microsoft YaHei", 10),
-                  bg=C["active"], fg=C["fg"], relief="flat", padx=16, pady=4,
-                  command=del_selected).pack(side="left", expand=True)
 
     def _poll_tick(self):
         self.player.tick()
