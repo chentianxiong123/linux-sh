@@ -198,21 +198,28 @@ DEFAULT_ICON_PATH = None
 
 
 def parse_desktop(file_path):
-    """解析 .desktop 文件，提取 Name, Icon, Exec + 生态分类"""
+    """解析 .desktop 文件：只解析 [Desktop Entry] 主段，提取 Name/Icon/Exec + 生态"""
     name = file_path.stem  # 兜底用文件名
     icon = None
     exec_cmd = None
 
     try:
         with open(file_path, "r", encoding="utf-8") as f:
+            in_main = False
             for line in f:
-                line = line.strip()
-                if line.startswith("Name="):
-                    name = line[5:].strip()
-                elif line.startswith("Icon="):
-                    icon = line[5:].strip()
-                elif line.startswith("Exec="):
-                    exec_cmd = line[5:].strip()
+                s = line.strip()
+                # 遇到段标题：[Desktop Entry] 进入；[Desktop Action ...] 及其他段忽略
+                if s.startswith("[") and s.endswith("]"):
+                    in_main = (s == "[Desktop Entry]")
+                    continue
+                if not in_main:
+                    continue
+                if s.startswith("Name=") and not s.startswith("Name["):
+                    name = s[5:].strip()
+                elif s.startswith("Icon=") and not s.startswith("Icon["):
+                    icon = s[5:].strip()
+                elif s.startswith("Exec="):
+                    exec_cmd = s[5:].strip()
     except Exception:
         pass
 
