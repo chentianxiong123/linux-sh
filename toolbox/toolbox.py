@@ -250,12 +250,8 @@ class ToolboxApp:
         if not self.items:
             return
 
-        # 计算网格尺寸：用最大索引 + 1（支持空格子）
-        if self._grid_items:
-            total_slots = max(self._grid_items.keys()) + 1
-        else:
-            total_slots = len(self.items)
-        
+        # 网格大小固定：等于 items 数量
+        total_slots = len(self.items)
         rows = (total_slots + GRID_COLS - 1) // GRID_COLS
         canvas_w = GRID_COLS * CELL_W + (GRID_COLS + 1) * PADDING
         canvas_h = rows * CELL_H + (rows + 1) * PADDING
@@ -464,12 +460,8 @@ class ToolboxApp:
         row = (event.y - PADDING) // CELL_H
         target_idx = row * GRID_COLS + col
         
-        # 检查目标格子是否在网格范围内
-        if self._grid_items:
-            total_slots = max(self._grid_items.keys()) + 1
-        else:
-            total_slots = len(self.items)
-        
+        # 检查目标格子是否在网格范围内（网格大小固定）
+        total_slots = len(self.items)
         if target_idx < 0 or target_idx >= total_slots:
             return
         
@@ -488,12 +480,8 @@ class ToolboxApp:
         
         src_idx = self._drag_grid_idx
         
-        # 边界检查
-        if self._grid_items:
-            total_slots = max(self._grid_items.keys()) + 1
-        else:
-            total_slots = len(self.items)
-        
+        # 边界检查（网格大小固定）
+        total_slots = len(self.items)
         if dst_idx < 0 or dst_idx >= total_slots or dst_idx == src_idx:
             return
         
