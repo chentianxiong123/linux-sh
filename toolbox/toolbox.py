@@ -201,9 +201,14 @@ class ToolboxApp:
         self._drag_item = None
         self._drag_start_x = 0
         self._drag_start_y = 0
-        self._drag_canvas_id = None
+        self._drag_ids = []
         self._is_dragging = False
         self._drag_threshold = 5  # 像素阈值，超过才算拖拽
+        
+        # 双击检测
+        self._last_click_time = None
+        self._last_click_item = None
+        self._last_target_tag = None
         
         self.load_desktops()
         self.draw_grid()
@@ -307,7 +312,7 @@ class ToolboxApp:
             tags=click_tag,
         )
 
-        # 绑定事件
+        # 绑定事件（全部在 click_tag 上）
         canvas.tag_bind(click_tag, "<Button-1>", lambda e, i=item: self._on_press(e, i))
         canvas.tag_bind(click_tag, "<B1-Motion>", lambda e: self._on_drag(e))
         canvas.tag_bind(click_tag, "<ButtonRelease-1>", lambda e, i=item: self._on_release(e, i))
@@ -320,15 +325,13 @@ class ToolboxApp:
 
     def _on_press(self, event, item):
         """鼠标按下：记录起始位置，准备拖拽"""
-        if self._is_dragging:
-            return
         self._drag_item = item
         self._drag_start_x = event.x
         self._drag_start_y = event.y
         self._is_dragging = False
-        # 绑定 canvas 级别的事件用于追踪拖拽
-        self.canvas.bind("<B1-Motion>", self._on_drag)
-        self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        # 清除上次双击检测
+        self._last_click_time = None
+        self._last_click_item = None
 
     def _on_drag(self, event):
         """拖动中：超过阈值则开始拖拽"""
@@ -341,38 +344,34 @@ class ToolboxApp:
         if not self._is_dragging and (abs(dx) > self._drag_threshold or abs(dy) > self._drag_threshold):
             # 开始拖拽
             self._is_dragging = True
+            self._drag_ids = []
             self._create_drag_visual(event)
         
         if self._is_dragging:
             self._update_drag_visual(event)
-            # 高亮目标格子
             self._highlight_drop_target(event)
 
     def _on_release(self, event, item):
-        """松开：完成拖拽或单击"""
-        self.canvas.unbind("<B1-Motion>")
-        self.canvas.unbind("<ButtonRelease-1>")
-        
-        if self._is_dragging and self._drag_item:
-            # 完成拖拽：检测目标格子并交换
+        """松开：完成拖拽或单击/双击"""
+        if self._is_dragging:
+            # 完成拖拽
             self._complete_drop(event)
             self._remove_drag_visual()
-        elif not self._is_dragging:
-            # 单击：选中
-            tag = f"cell_{id(item)}"
-            self.select(item, tag)
-            # 双击检测（200ms 内第二次按下）
-            if hasattr(self, '_last_click_time') and hasattr(self, '_last_click_item'):
-                elapsed = (time.time() - self._last_click_time) * 1000
-                if elapsed < 300 and self._last_click_item == item:
-                    # 双击
-                    self.launch(item)
-                    self._last_click_time = None
-                else:
-                    self._last_click_time = time.time()
-                    self._last_click_item = item
+        else:
+            # 单击/双击检测
+            now = time.time()
+            if (self._last_click_time is not None and
+                self._last_click_item == item and
+                (now - self._last_click_time) < 0.3):
+                # 双击：启动
+                self.launch(item)
+                self._last_click_time = None
+                self._last_click_item = None
             else:
-                self._last_click_time = time.time()
+                # 单击：选中
+                tag = f"cell_{id(item)}"
+                self.select(item, tag)
+                self._last_click_time = now
                 self._last_click_item = item
         
         # 重置拖拽状态
@@ -382,48 +381,47 @@ class ToolboxApp:
     def _create_drag_visual(self, event):
         """创建拖拽视觉（半透明图标跟随鼠标）"""
         item = self._drag_item
+        ids = []
         # 半透明背景
-        self._drag_canvas_id = self.canvas.create_rectangle(
+        ids.append(self.canvas.create_rectangle(
             event.x - 40, event.y - 40, event.x + 40, event.y + 40,
             fill="#2a3f6e", outline=C_ACCENT, width=2,
-        )
+        ))
         # 图标
         photo = self.make_photo(item)
         if photo:
-            self._drag_icon_id = self.canvas.create_image(
+            ids.append(self.canvas.create_image(
                 event.x, event.y - 10, image=photo, anchor="center"
-            )
+            ))
         else:
-            self._drag_icon_id = self.canvas.create_text(
+            ids.append(self.canvas.create_text(
                 event.x, event.y - 10, text="📦", font=("Segoe UI Emoji", 24)
-            )
+            ))
         # 文字
         name = item["name"][:8]
-        self._drag_text_id = self.canvas.create_text(
+        ids.append(self.canvas.create_text(
             event.x, event.y + 20, text=name, font=("Microsoft YaHei", 9), fill=C_FG
-        )
+        ))
+        self._drag_ids = ids
 
     def _update_drag_visual(self, event):
         """更新拖拽视觉位置"""
-        if self._drag_canvas_id:
-            self.canvas.coords(self._drag_canvas_id,
-                             event.x - 40, event.y - 40, event.x + 40, event.y + 40)
-        if hasattr(self, '_drag_icon_id'):
-            self.canvas.coords(self._drag_icon_id, event.x, event.y - 10)
-        if hasattr(self, '_drag_text_id'):
-            self.canvas.coords(self._drag_text_id, event.x, event.y + 20)
+        if not self._drag_ids:
+            return
+        # 背景
+        self.canvas.coords(self._drag_ids[0],
+                         event.x - 40, event.y - 40, event.x + 40, event.y + 40)
+        # 图标
+        self.canvas.coords(self._drag_ids[1], event.x, event.y - 10)
+        # 文字
+        self.canvas.coords(self._drag_ids[2], event.x, event.y + 20)
 
     def _remove_drag_visual(self):
         """移除拖拽视觉"""
-        if self._drag_canvas_id:
-            self.canvas.delete(self._drag_canvas_id)
-            self._drag_canvas_id = None
-        if hasattr(self, '_drag_icon_id'):
-            self.canvas.delete(self._drag_icon_id)
-            self._drag_icon_id = None
-        if hasattr(self, '_drag_text_id'):
-            self.canvas.delete(self._drag_text_id)
-            self._drag_text_id = None
+        if self._drag_ids:
+            for cid in self._drag_ids:
+                self.canvas.delete(cid)
+            self._drag_ids = []
 
     def _highlight_drop_target(self, event):
         """高亮鼠标下的目标格子"""
