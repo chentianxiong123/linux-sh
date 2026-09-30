@@ -189,8 +189,10 @@ class ToolboxApp:
         self.root.geometry("800x600")
         self.root.configure(bg=C_BG)
         self.root.resizable(False, False)
+        self.root.wm_protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.items = []
+        self._selected_tag = None  # 当前选中的格子
         self.load_desktops()
         self.draw_grid()
 
@@ -205,6 +207,10 @@ class ToolboxApp:
                 justify="center",
             )
             label.pack(expand=True)
+
+    def _on_close(self):
+        """窗口关闭"""
+        self.root.destroy()
 
     def load_desktops(self):
         """扫描 desktop 目录"""
@@ -240,28 +246,35 @@ class ToolboxApp:
             self.draw_cell(self.canvas, item, x, y)
 
     def draw_cell(self, canvas, item, cx, cy):
-        """画一个格子：图标 + 文字"""
-        # 背景卡片
+        """画一个格子：背景卡片 + 图标 + 文字 + 高亮层"""
         x0, y0 = cx - CELL_W // 2 + 10, cy - CELL_H // 2 + 10
         x1, y1 = cx + CELL_W // 2 - 10, cy + CELL_H // 2 - 10
+
+        tag = f"cell_{id(item)}"
+
+        # 1. 背景卡片（最底层）
         canvas.create_rectangle(
             x0, y0, x1, y1,
             fill=C_CARD, outline="",
         )
 
-        # 图标
+        # 2. 高亮层（在背景之上，图标之下）
+        canvas.create_rectangle(
+            x0, y0, x1, y1,
+            fill="", outline="",
+            tags=tag,
+        )
+
+        # 3. 图标
         photo = self.make_photo(item)
         if photo:
-            # 居中偏上
             iy = cy - 15
             canvas.create_image(cx, iy, image=photo, anchor="center")
-            # 保存引用防止 GC
-            setattr(self, f"_img_{id(item)}", photo)
+            setattr(self, f"_img_{id(item)}", photo)  # 防止 GC
         else:
-            # 兜底：画个 emoji
             canvas.create_text(cx, cy - 15, text="📦", font=("Segoe UI Emoji", 28), fill=C_FG)
 
-        # 文字
+        # 4. 文字
         name = item["name"]
         if len(name) > 10:
             name = name[:9] + "…"
@@ -272,18 +285,19 @@ class ToolboxApp:
             fill=C_FG,
         )
 
-        # 绑定点击
-        tag = f"cell_{id(item)}"
-        canvas.tag_bind(tag, "<Button-1>", lambda e, i=item: self.launch(i))
-        canvas.tag_bind(tag, "<Enter>", lambda e, t=tag: self.on_hover(t, True))
-        canvas.tag_bind(tag, "<Leave>", lambda e, t=tag: self.on_hover(t, False))
-
-        # 用矩形作为点击区域
+        # 5. 点击区域（最上层，透明）
+        click_tag = f"click_{id(item)}"
         canvas.create_rectangle(
             x0, y0, x1, y1,
             fill="", outline="",
-            tags=tag,
+            tags=click_tag,
         )
+
+        # 绑定事件
+        canvas.tag_bind(click_tag, "<Double-Button-1>", lambda e, i=item: self.launch(i))
+        canvas.tag_bind(click_tag, "<Button-1>", lambda e, i=item: self.select(i, tag))
+        canvas.tag_bind(click_tag, "<Enter>", lambda e, t=tag: self.on_hover(t, True))
+        canvas.tag_bind(click_tag, "<Leave>", lambda e, t=tag: self.on_hover(t, False))
 
     def make_photo(self, item):
         """把 PIL Image 转成 Tkinter PhotoImage"""
@@ -299,14 +313,25 @@ class ToolboxApp:
             return None
 
     def on_hover(self, tag, entering):
-        """悬停效果"""
+        """悬停效果：高亮背景，不遮住图标"""
         if entering:
             self.canvas.itemconfig(tag, fill="#1e2f5e", outline=C_ACCENT)
         else:
-            self.canvas.itemconfig(tag, fill="", outline="")
+            # 如果当前是选中状态，保持高亮
+            if not self._selected_tag or self._selected_tag != tag:
+                self.canvas.itemconfig(tag, fill="", outline="")
+
+    def select(self, item, tag):
+        """单击选中，保持高亮"""
+        # 取消之前的选中
+        if self._selected_tag:
+            self.canvas.itemconfig(self._selected_tag, fill="", outline="")
+        # 选中当前
+        self._selected_tag = tag
+        self.canvas.itemconfig(tag, fill="#1e2f5e", outline=C_ACCENT)
 
     def launch(self, item):
-        """启动工具"""
+        """双击启动工具（脱离父进程会话）"""
         if item["exec"]:
             try:
                 subprocess.Popen(
@@ -314,6 +339,7 @@ class ToolboxApp:
                     shell=True,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
+                    start_new_session=True,  # 脱离 toolbox 会话，独立运行
                 )
             except Exception as e:
                 tk.messagebox.showerror("启动失败", f"{item['name']}: {e}")
