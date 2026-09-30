@@ -23,16 +23,15 @@ from tkinter import ttk, filedialog, messagebox
 
 import requests
 
-# ── 历史记录：只存 ID/标题，不缓存音频 ────────────────
-HISTORY_FILE = Path.home() / ".config" / "music" / "history.json"
-HISTORY_MAX = 20
+# ── 收藏：只存 ID/标题，不缓存音频 ────────────────
+FAV_FILE = Path.home() / ".config" / "music" / "favorites.json"
 
 
-def _load_history():
-    """读取历史（[{bvid,title,author,duration,qn}]）"""
+def _load_favs():
+    """读取收藏（[{bvid,title,author,duration,qn}]）"""
     try:
-        if HISTORY_FILE.exists():
-            with open(HISTORY_FILE) as f:
+        if FAV_FILE.exists():
+            with open(FAV_FILE) as f:
                 data = json.load(f)
             if isinstance(data, list):
                 return data
@@ -41,16 +40,26 @@ def _load_history():
     return []
 
 
-def _save_history(entry):
-    """写入一条历史，同 bvid 去重，最多 20 条"""
+def _save_fav(entry):
+    """收藏一条，同 bvid 去重"""
     try:
-        HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        hist = _load_history()
-        hist = [h for h in hist if h.get("bvid") != entry.get("bvid")]
-        hist.insert(0, entry)
-        hist = hist[:HISTORY_MAX]
-        with open(HISTORY_FILE, "w") as f:
-            json.dump(hist, f, ensure_ascii=False)
+        FAV_FILE.parent.mkdir(parents=True, exist_ok=True)
+        favs = _load_favs()
+        favs = [f for f in favs if f.get("bvid") != entry.get("bvid")]
+        favs.insert(0, entry)
+        with open(FAV_FILE, "w") as f:
+            json.dump(favs, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _remove_fav(bvid):
+    """取消收藏"""
+    try:
+        favs = _load_favs()
+        favs = [f for f in favs if f.get("bvid") != bvid]
+        with open(FAV_FILE, "w") as f:
+            json.dump(favs, f, ensure_ascii=False)
     except Exception:
         pass
 
@@ -340,13 +349,13 @@ class MusicApp:
         )
         self.btn_search.pack(side="left")
 
-        # 历史（只存 ID，不缓存音频）
-        self.btn_history = tk.Button(
-            top, text="🕘 历史", font=f, bg=C["active"], fg=C["fg"],
+        # 收藏夹（只存 ID，不缓存音频）
+        self.btn_favs = tk.Button(
+            top, text="★ 收藏夹", font=f, bg=C["active"], fg=C["fg"],
             activebackground=C["accent"], activeforeground="#fff",
-            relief="flat", padx=12, pady=4, command=self._show_history,
+            relief="flat", padx=12, pady=4, command=self._show_favs,
         )
-        self.btn_history.pack(side="left", padx=(6, 0))
+        self.btn_favs.pack(side="left", padx=(6, 0))
 
         # ── 结果列表 ──
         list_frame = tk.Frame(self.root, bg=C["card"], relief="flat")
@@ -394,22 +403,22 @@ class MusicApp:
                             fg=C["muted"], bg=C["card"])
         self.vol.pack(fill="x", padx=12, pady=(0, 8))
 
-        # ── 控制按钮 ──
+        # ── 控制按钮（统一等宽，均匀分布） ──
         ctrl = tk.Frame(player, bg=C["card"])
         ctrl.pack(fill="x", padx=12, pady=(4, 12))
 
         self.btn = {}
-        for text, cmd, w in [("⏮ prev", self._prev, 6),
-                              ("▶ play", self._play, 8),
-                              ("⏸ pause", self._pause, 8),
-                              ("⏹ stop", self._stop, 6),
-                              ("next ⏭", self._next, 6)]:
-            b = tk.Button(ctrl, text=text, font=f, bg=C["active"], fg=C["fg"],
+        for key, text, cmd in [("prev", "⏮ 上首", self._prev),
+                               ("play", "▶ 播放", self._play_toggle),
+                               ("fav", "★ 收藏", self._fav_current),
+                               ("next", "下首 ⏭", self._next)]:
+            bg = C["accent"] if key == "play" else C["active"]
+            b = tk.Button(ctrl, text=text, font=f, bg=bg, fg="#fff",
                           activebackground=C["accent"], activeforeground="#fff",
-                          relief="flat", padx=12, pady=5, width=w,
-                          command=cmd)
-            b.pack(side="left", expand=True, padx=3)
-            self.btn[cmd.__name__.lstrip("_")] = b
+                          relief="flat", width=8, pady=5,
+                          command=cmd, cursor="hand2")
+            b.pack(side="left", expand=True, padx=4)
+            self.btn[key] = b
 
     # ── 事件 ──
     def _search(self):
@@ -466,28 +475,39 @@ class MusicApp:
                 self.player.load(url, _parse_dur(item["duration"]))
                 self.player.start()
                 self.info.configure(text=f"🎵 {item['title']} — {item['author']} [{qn_label}]")
-                # 只存 ID/标题/音质，不缓存音频文件
-                _save_history({
-                    "bvid": item["bvid"],
-                    "title": item["title"],
-                    "author": item.get("author", ""),
-                    "duration": item.get("duration", ""),
-                    "qn": actual_qn,
-                })
+                self.btn["play"].configure(text="▶ 播放")
             except Exception as e:
                 self.info.configure(text=f"❌ {e}")
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _pause(self):
-        if self.player.url:
+    def _play_toggle(self):
+        """播放/暂停切换（一个按钮）"""
+        if self.player.url and self.player.ffmpeg is not None:
             self.player.toggle()
+            if self.player.paused:
+                self.btn["play"].configure(text="⏸ 暂停")
+            else:
+                self.btn["play"].configure(text="▶ 播放")
+        else:
+            self._play()
 
-    def _stop(self):
-        self.player.stop()
-        self.cur.configure(text="00:00")
-        self._draw_seek(0)
-        self.info.configure(text="已停止")
+    def _fav_current(self):
+        """收藏当前选中的歌曲（只存 ID）"""
+        if self.current is None:
+            notify(self.root, "⚠️ 先选择歌曲", "err")
+            return
+        item = self.results[self.current]
+        qn_map = {"64k": AUDIO_64K, "128k": AUDIO_128K, "192k": AUDIO_192K}
+        qn = qn_map.get(self.qn_var.get(), PREFERRED_QN)
+        _save_fav({
+            "bvid": item["bvid"],
+            "title": item["title"],
+            "author": item.get("author", ""),
+            "duration": item.get("duration", ""),
+            "qn": qn,
+        })
+        notify(self.root, f"★ 已收藏: {item['title']}")
 
     def _prev(self):
         if self.current is not None and self.current > 0:
@@ -581,16 +601,16 @@ class MusicApp:
         if was_paused:
             self.player.pause()
 
-    # ── 历史（只存 ID） ──
-    def _show_history(self):
-        """历史弹窗：双击播放"""
-        hist = _load_history()
-        if not hist:
-            notify(self.root, "暂无历史", "err")
+    # ── 收藏夹（只存 ID） ──
+    def _show_favs(self):
+        """收藏夹弹窗：双击播放，选中可删除"""
+        favs = _load_favs()
+        if not favs:
+            notify(self.root, "收藏夹为空", "err")
             return
 
         win = tk.Toplevel(self.root)
-        win.title("🕘 播放历史")
+        win.title("★ 收藏夹")
         win.geometry("560x420")
         win.configure(bg=C["bg"])
 
@@ -604,21 +624,36 @@ class MusicApp:
         lb.pack(side="left", fill="both", expand=True, padx=10, pady=10)
         sb.pack(side="right", fill="y", pady=10)
 
-        for h in hist:
-            lb.insert("end", f"  [{h.get('duration','')}]  {h.get('title','')}  —  {h.get('author','')}")
+        for f in favs:
+            lb.insert("end", f"  [{f.get('duration','')}]  {f.get('title','')}  —  {f.get('author','')}")
 
         def play_selected(_e=None):
             sel = lb.curselection()
             if not sel:
                 return
-            item = hist[sel[0]]
+            item = favs[sel[0]]
             win.destroy()
             self._play_item(item)
 
+        def del_selected():
+            sel = lb.curselection()
+            if not sel:
+                return
+            bvid = favs[sel[0]].get("bvid")
+            _remove_fav(bvid)
+            favs.pop(sel[0])
+            lb.delete(sel[0])
+            notify(self.root, "已取消收藏")
+
         lb.bind("<Double-Button-1>", play_selected)
-        tk.Button(win, text="▶ 播放选中", font=("Microsoft YaHei", 10),
+        btns = tk.Frame(win, bg=C["bg"])
+        btns.pack(fill="x", padx=10, pady=(0, 10))
+        tk.Button(btns, text="▶ 播放", font=("Microsoft YaHei", 10),
                   bg=C["accent"], fg="#fff", relief="flat", padx=16, pady=4,
-                  command=play_selected).pack(pady=(0, 10))
+                  command=play_selected).pack(side="left", expand=True)
+        tk.Button(btns, text="🗑 删除", font=("Microsoft YaHei", 10),
+                  bg=C["active"], fg=C["fg"], relief="flat", padx=16, pady=4,
+                  command=del_selected).pack(side="left", expand=True)
 
     def _poll_tick(self):
         self.player.tick()
