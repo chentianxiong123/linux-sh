@@ -6,6 +6,7 @@
 
 import os
 import subprocess
+import time
 import tkinter as tk
 from pathlib import Path
 
@@ -195,6 +196,15 @@ class ToolboxApp:
 
         self.items = []
         self._selected_tag = None  # 当前选中的格子
+        
+        # 拖拽状态
+        self._drag_item = None
+        self._drag_start_x = 0
+        self._drag_start_y = 0
+        self._drag_canvas_id = None
+        self._is_dragging = False
+        self._drag_threshold = 5  # 像素阈值，超过才算拖拽
+        
         self.load_desktops()
         self.draw_grid()
 
@@ -220,6 +230,8 @@ class ToolboxApp:
             return
         for f in sorted(DESKTOP_DIR.glob("*.desktop")):
             self.items.append(parse_desktop(f))
+        # 加载保存的顺序
+        self._load_order()
 
     def draw_grid(self):
         """用 Canvas 画网格"""
@@ -296,11 +308,196 @@ class ToolboxApp:
         )
 
         # 绑定事件
-        canvas.tag_bind(click_tag, "<Double-Button-1>", lambda e, i=item: self.launch(i))
-        canvas.tag_bind(click_tag, "<Button-1>", lambda e, i=item: self.select(i, tag))
+        canvas.tag_bind(click_tag, "<Button-1>", lambda e, i=item: self._on_press(e, i))
+        canvas.tag_bind(click_tag, "<B1-Motion>", lambda e: self._on_drag(e))
+        canvas.tag_bind(click_tag, "<ButtonRelease-1>", lambda e, i=item: self._on_release(e, i))
         canvas.tag_bind(click_tag, "<Button-3>", lambda e, i=item: self.show_menu(e, i))
         canvas.tag_bind(click_tag, "<Enter>", lambda e, t=tag: self.on_hover(t, True))
         canvas.tag_bind(click_tag, "<Leave>", lambda e, t=tag: self.on_hover(t, False))
+        
+        # 保存位置信息用于拖拽检测
+        item['_pos'] = (cx, cy)
+
+    def _on_press(self, event, item):
+        """鼠标按下：记录起始位置，准备拖拽"""
+        if self._is_dragging:
+            return
+        self._drag_item = item
+        self._drag_start_x = event.x
+        self._drag_start_y = event.y
+        self._is_dragging = False
+        # 绑定 canvas 级别的事件用于追踪拖拽
+        self.canvas.bind("<B1-Motion>", self._on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
+
+    def _on_drag(self, event):
+        """拖动中：超过阈值则开始拖拽"""
+        if not self._drag_item:
+            return
+        
+        dx = event.x - self._drag_start_x
+        dy = event.y - self._drag_start_y
+        
+        if not self._is_dragging and (abs(dx) > self._drag_threshold or abs(dy) > self._drag_threshold):
+            # 开始拖拽
+            self._is_dragging = True
+            self._create_drag_visual(event)
+        
+        if self._is_dragging:
+            self._update_drag_visual(event)
+            # 高亮目标格子
+            self._highlight_drop_target(event)
+
+    def _on_release(self, event, item):
+        """松开：完成拖拽或单击"""
+        self.canvas.unbind("<B1-Motion>")
+        self.canvas.unbind("<ButtonRelease-1>")
+        
+        if self._is_dragging and self._drag_item:
+            # 完成拖拽：检测目标格子并交换
+            self._complete_drop(event)
+            self._remove_drag_visual()
+        elif not self._is_dragging:
+            # 单击：选中
+            tag = f"cell_{id(item)}"
+            self.select(item, tag)
+            # 双击检测（200ms 内第二次按下）
+            if hasattr(self, '_last_click_time') and hasattr(self, '_last_click_item'):
+                elapsed = (time.time() - self._last_click_time) * 1000
+                if elapsed < 300 and self._last_click_item == item:
+                    # 双击
+                    self.launch(item)
+                    self._last_click_time = None
+                else:
+                    self._last_click_time = time.time()
+                    self._last_click_item = item
+            else:
+                self._last_click_time = time.time()
+                self._last_click_item = item
+        
+        # 重置拖拽状态
+        self._drag_item = None
+        self._is_dragging = False
+
+    def _create_drag_visual(self, event):
+        """创建拖拽视觉（半透明图标跟随鼠标）"""
+        item = self._drag_item
+        # 半透明背景
+        self._drag_canvas_id = self.canvas.create_rectangle(
+            event.x - 40, event.y - 40, event.x + 40, event.y + 40,
+            fill="#2a3f6e", outline=C_ACCENT, width=2,
+        )
+        # 图标
+        photo = self.make_photo(item)
+        if photo:
+            self._drag_icon_id = self.canvas.create_image(
+                event.x, event.y - 10, image=photo, anchor="center"
+            )
+        else:
+            self._drag_icon_id = self.canvas.create_text(
+                event.x, event.y - 10, text="📦", font=("Segoe UI Emoji", 24)
+            )
+        # 文字
+        name = item["name"][:8]
+        self._drag_text_id = self.canvas.create_text(
+            event.x, event.y + 20, text=name, font=("Microsoft YaHei", 9), fill=C_FG
+        )
+
+    def _update_drag_visual(self, event):
+        """更新拖拽视觉位置"""
+        if self._drag_canvas_id:
+            self.canvas.coords(self._drag_canvas_id,
+                             event.x - 40, event.y - 40, event.x + 40, event.y + 40)
+        if hasattr(self, '_drag_icon_id'):
+            self.canvas.coords(self._drag_icon_id, event.x, event.y - 10)
+        if hasattr(self, '_drag_text_id'):
+            self.canvas.coords(self._drag_text_id, event.x, event.y + 20)
+
+    def _remove_drag_visual(self):
+        """移除拖拽视觉"""
+        if self._drag_canvas_id:
+            self.canvas.delete(self._drag_canvas_id)
+            self._drag_canvas_id = None
+        if hasattr(self, '_drag_icon_id'):
+            self.canvas.delete(self._drag_icon_id)
+            self._drag_icon_id = None
+        if hasattr(self, '_drag_text_id'):
+            self.canvas.delete(self._drag_text_id)
+            self._drag_text_id = None
+
+    def _highlight_drop_target(self, event):
+        """高亮鼠标下的目标格子"""
+        if hasattr(self, '_last_target_tag'):
+            self.canvas.itemconfig(self._last_target_tag, fill="", outline="")
+        
+        # 检测鼠标下的格子
+        for item in self.items:
+            if '_pos' not in item:
+                continue
+            cx, cy = item['_pos']
+            if abs(event.x - cx) < CELL_W // 2 and abs(event.y - cy) < CELL_H // 2:
+                if item != self._drag_item:
+                    tag = f"cell_{id(item)}"
+                    self.canvas.itemconfig(tag, fill="#2a4f7e", outline=C_ACCENT)
+                    self._last_target_tag = tag
+                break
+
+    def _complete_drop(self, event):
+        """完成拖拽：交换两个格子"""
+        target = None
+        for item in self.items:
+            if '_pos' not in item:
+                continue
+            cx, cy = item['_pos']
+            if abs(event.x - cx) < CELL_W // 2 and abs(event.y - cy) < CELL_H // 2:
+                if item != self._drag_item:
+                    target = item
+                break
+        
+        if target:
+            # 交换两个 item 在列表中的位置
+            src_idx = self.items.index(self._drag_item)
+            dst_idx = self.items.index(target)
+            self.items[src_idx], self.items[dst_idx] = self.items[dst_idx], self.items[src_idx]
+            # 重绘
+            self.canvas.delete("all")
+            self.draw_grid()
+            # 保存顺序
+            self._save_order()
+
+    def _save_order(self):
+        """保存图标顺序到文件"""
+        import json
+        from pathlib import Path
+        order_file = Path.home() / ".config" / "toolbox" / "order.json"
+        order_file.parent.mkdir(parents=True, exist_ok=True)
+        order = [item['path'] for item in self.items]
+        with open(order_file, 'w') as f:
+            json.dump(order, f)
+
+    def _load_order(self):
+        """加载图标顺序"""
+        import json
+        from pathlib import Path
+        order_file = Path.home() / ".config" / "toolbox" / "order.json"
+        if not order_file.exists():
+            return
+        try:
+            with open(order_file) as f:
+                order = json.load(f)
+            # 按保存的顺序重新排列
+            path_to_item = {item['path']: item for item in self.items}
+            new_items = []
+            for path in order:
+                if path in path_to_item:
+                    new_items.append(path_to_item[path])
+            # 添加未在保存顺序中的新文件
+            for item in self.items:
+                if item not in new_items:
+                    new_items.append(item)
+            self.items = new_items
+        except Exception:
+            pass
 
     def make_photo(self, item):
         """把 PIL Image 转成 Tkinter PhotoImage"""
