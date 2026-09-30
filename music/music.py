@@ -144,6 +144,26 @@ def _parse_dur(s):
         return -1
 
 
+def _rank(item):
+    """排序加权分：越低越靠前。包装度(符号/包装词) + 碎片/教学降权"""
+    t = item["title"]
+    pkg = 0
+    # 括号修饰越多越沉底（[4K]/【爷青回】…是搬运/包装）
+    for ch in "[]【】（）()":
+        pkg += t.count(ch)
+    low = t.lower()
+    for w in ("4k", "无损", "hi-res", "hires", "爷青回", "修复", "极致",
+              "超清", "高清", "最高音质", "官方", "精彩", "现场"):
+        if w in low:
+            pkg += 1
+    # 非歌内容降权：教学区 / 零碎片段(<1:30) / 过长
+    if item.get("typename") in ("音乐教学",):
+        pkg += 2
+    if item["sec"] < 90 or item["sec"] > 600:
+        pkg += 2
+    return pkg
+
+
 def _search(keyword):
     """B站搜索：API 原生 duration=1(10分钟以下) 过滤短视频，本地再按时长升序
     参数：duration 0全/1<10分/2 10-30分/3 30-60分/4>60分；order 排序；tids 分区"""
@@ -167,9 +187,9 @@ def _search(keyword):
             "typename": it.get("typename", ""),   # 分区名：MV/翻唱/音乐现场…
             "sec": _parse_dur(it.get("duration", "")),
         })
-    # 解析失败/异常时长滤掉，剩余按时长升序（MV/翻唱排前）
+    # 解析失败/异常时长滤掉，剩余排序加权：朴素标题+完整歌在前，包装/教学/碎片沉底；同权重内短优先
     out = [it for it in out if it["sec"] > 0]
-    out.sort(key=lambda it: it["sec"])
+    out.sort(key=lambda it: (_rank(it), it["sec"]))
     return out
 
 
