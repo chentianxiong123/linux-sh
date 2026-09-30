@@ -266,14 +266,14 @@ class ToolboxApp:
             x = PADDING + col * CELL_W + CELL_W // 2
             y = PADDING + row * CELL_H + CELL_H // 2
 
-            self.draw_cell(self.canvas, item, x, y)
+            self.draw_cell(self.canvas, item, x, y, idx)
 
-    def draw_cell(self, canvas, item, cx, cy):
+    def draw_cell(self, canvas, item, cx, cy, grid_idx):
         """画一个格子：背景卡片 + 图标 + 文字 + 高亮层"""
         x0, y0 = cx - CELL_W // 2 + 10, cy - CELL_H // 2 + 10
         x1, y1 = cx + CELL_W // 2 - 10, cy + CELL_H // 2 - 10
 
-        tag = f"cell_{id(item)}"
+        tag = f"cell_{grid_idx}"
 
         # 1. 背景卡片（最底层）
         canvas.create_rectangle(
@@ -293,7 +293,7 @@ class ToolboxApp:
         if photo:
             iy = cy - 15
             canvas.create_image(cx, iy, image=photo, anchor="center")
-            setattr(self, f"_img_{id(item)}", photo)  # 防止 GC
+            setattr(self, f"_img_{grid_idx}", photo)  # 防止 GC
         else:
             canvas.create_text(cx, cy - 15, text="📦", font=("Segoe UI Emoji", 28), fill=C_FG)
 
@@ -309,7 +309,7 @@ class ToolboxApp:
         )
 
         # 5. 点击区域（最上层，透明）
-        click_tag = f"click_{id(item)}"
+        click_tag = f"click_{grid_idx}"
         canvas.create_rectangle(
             x0, y0, x1, y1,
             fill="", outline="",
@@ -317,9 +317,9 @@ class ToolboxApp:
         )
 
         # 绑定事件（全部在 click_tag 上）
-        canvas.tag_bind(click_tag, "<Button-1>", lambda e, i=item: self._on_press(e, i))
+        canvas.tag_bind(click_tag, "<Button-1>", lambda e, i=item, g=grid_idx: self._on_press(e, i, g))
         canvas.tag_bind(click_tag, "<B1-Motion>", lambda e: self._on_drag(e))
-        canvas.tag_bind(click_tag, "<ButtonRelease-1>", lambda e, i=item: self._on_release(e, i))
+        canvas.tag_bind(click_tag, "<ButtonRelease-1>", lambda e, i=item, g=grid_idx: self._on_release(e, i, g))
         canvas.tag_bind(click_tag, "<Button-3>", lambda e, i=item: self.show_menu(e, i))
         canvas.tag_bind(click_tag, "<Enter>", lambda e, t=tag: self.on_hover(t, True))
         canvas.tag_bind(click_tag, "<Leave>", lambda e, t=tag: self.on_hover(t, False))
@@ -327,9 +327,10 @@ class ToolboxApp:
         # 保存位置信息用于拖拽检测
         item['_pos'] = (cx, cy)
 
-    def _on_press(self, event, item):
+    def _on_press(self, event, item, grid_idx):
         """鼠标按下：记录起始位置，准备拖拽"""
         self._drag_item = item
+        self._drag_grid_idx = grid_idx
         self._drag_start_x = event.x
         self._drag_start_y = event.y
         self._is_dragging = False
@@ -355,7 +356,7 @@ class ToolboxApp:
             self._update_drag_visual(event)
             self._highlight_drop_target(event)
 
-    def _on_release(self, event, item):
+    def _on_release(self, event, item, grid_idx):
         """松开：完成拖拽或单击/双击"""
         if self._is_dragging:
             # 完成拖拽
@@ -373,7 +374,7 @@ class ToolboxApp:
                 self._last_click_item = None
             else:
                 # 单击：选中
-                tag = f"cell_{id(item)}"
+                tag = f"cell_{grid_idx}"
                 self.select(item, tag)
                 self._last_click_time = now
                 self._last_click_item = item
@@ -433,37 +434,55 @@ class ToolboxApp:
             self.canvas.itemconfig(self._last_target_tag, fill="", outline="")
         
         # 检测鼠标下的格子
-        for item in self.items:
+        for idx, item in enumerate(self.items):
             if '_pos' not in item:
                 continue
             cx, cy = item['_pos']
             if abs(event.x - cx) < CELL_W // 2 and abs(event.y - cy) < CELL_H // 2:
                 if item != self._drag_item:
-                    tag = f"cell_{id(item)}"
+                    tag = f"cell_{idx}"
                     self.canvas.itemconfig(tag, fill="#2a4f7e", outline=C_ACCENT)
                     self._last_target_tag = tag
                 break
 
     def _complete_drop(self, event):
-        """完成拖拽：交换两个格子"""
+        """完成拖拽：交换两个格子（局部更新，避免闪烁）"""
         target = None
-        for item in self.items:
+        target_idx = None
+        for idx, item in enumerate(self.items):
             if '_pos' not in item:
                 continue
             cx, cy = item['_pos']
             if abs(event.x - cx) < CELL_W // 2 and abs(event.y - cy) < CELL_H // 2:
                 if item != self._drag_item:
                     target = item
+                    target_idx = idx
                 break
         
-        if target:
+        if target and target_idx is not None:
             # 交换两个 item 在列表中的位置
-            src_idx = self.items.index(self._drag_item)
-            dst_idx = self.items.index(target)
+            src_idx = self._drag_grid_idx
+            dst_idx = target_idx
             self.items[src_idx], self.items[dst_idx] = self.items[dst_idx], self.items[src_idx]
-            # 重绘
-            self.canvas.delete("all")
-            self.draw_grid()
+            
+            # 局部更新：只删除并重绘这两个格子
+            src_tag = f"cell_{src_idx}"
+            dst_tag = f"cell_{dst_idx}"
+            click_src_tag = f"click_{src_idx}"
+            click_dst_tag = f"click_{dst_idx}"
+            
+            # 删除旧的格子元素
+            self.canvas.delete(src_tag, dst_tag, click_src_tag, click_dst_tag)
+            
+            # 重新绘制这两个格子
+            src_item = self.items[src_idx]
+            dst_item = self.items[dst_idx]
+            src_cx, src_cy = src_item['_pos']
+            dst_cx, dst_cy = dst_item['_pos']
+            
+            self.draw_cell(self.canvas, src_item, dst_cx, dst_cy, dst_idx)
+            self.draw_cell(self.canvas, dst_item, src_cx, src_cy, src_idx)
+            
             # 保存顺序
             self._save_order()
 
