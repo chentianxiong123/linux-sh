@@ -246,13 +246,13 @@ class ToolboxApp:
             self._init_grid()
 
     def draw_grid(self):
-        """用 Canvas 画网格（支持空格子）"""
+        """用 Canvas 画网格（固定大小，向上取整到 GRID_COLS 倍数）"""
         if not self.items:
             return
 
-        # 网格大小固定：等于 items 数量
-        total_slots = len(self.items)
-        rows = (total_slots + GRID_COLS - 1) // GRID_COLS
+        # 网格大小固定：向上取整到 GRID_COLS 的倍数
+        rows = (len(self.items) + GRID_COLS - 1) // GRID_COLS
+        total_slots = rows * GRID_COLS  # 10 个 items → 12 个格子
         canvas_w = GRID_COLS * CELL_W + (GRID_COLS + 1) * PADDING
         canvas_h = rows * CELL_H + (rows + 1) * PADDING
 
@@ -450,6 +450,11 @@ class ToolboxApp:
                 self.canvas.delete(cid)
             self._drag_ids = []
 
+    def _get_total_slots(self):
+        """获取网格总格子数（向上取整到 GRID_COLS 倍数）"""
+        rows = (len(self.items) + GRID_COLS - 1) // GRID_COLS
+        return rows * GRID_COLS
+
     def _highlight_drop_target(self, event):
         """高亮鼠标下的目标格子"""
         if self._last_target_tag:
@@ -460,8 +465,8 @@ class ToolboxApp:
         row = (event.y - PADDING) // CELL_H
         target_idx = row * GRID_COLS + col
         
-        # 检查目标格子是否在网格范围内（网格大小固定）
-        total_slots = len(self.items)
+        # 检查目标格子是否在网格范围内（防止拖到外面）
+        total_slots = self._get_total_slots()
         if target_idx < 0 or target_idx >= total_slots:
             return
         
@@ -480,8 +485,8 @@ class ToolboxApp:
         
         src_idx = self._drag_grid_idx
         
-        # 边界检查（网格大小固定）
-        total_slots = len(self.items)
+        # 边界检查（防止拖到外面）
+        total_slots = self._get_total_slots()
         if dst_idx < 0 or dst_idx >= total_slots or dst_idx == src_idx:
             return
         
