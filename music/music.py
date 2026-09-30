@@ -153,6 +153,7 @@ def _search(keyword):
         "page": 1,
         "pagesize": 50,
         "duration": 1,   # 服务器端就只要 10 分钟以下的
+        "tids": 3,       # 音乐区：服务器端只搜音乐（滤掉日常/影视剪辑等）
     }).json()
     if r.get("code") != 0:
         raise ValueError(r.get("message", "搜索失败"))
@@ -163,6 +164,7 @@ def _search(keyword):
             "title": _tag_re.sub("", it.get("title", "")),
             "duration": it.get("duration", ""),
             "author": it.get("author", ""),
+            "typename": it.get("typename", ""),   # 分区名：MV/翻唱/音乐现场…
             "sec": _parse_dur(it.get("duration", "")),
         })
     # 解析失败/异常时长滤掉，剩余按时长升序（MV/翻唱排前）
@@ -604,7 +606,7 @@ class MusicApp:
         for it in self._source:
             self.listbox.insert(
                 "end",
-                f"  [{it.get('duration','')}]  {it.get('title','')}  —  {it.get('author','')}",
+                f"  [{_fmt_dur(it.get('duration',''))}][{it.get('typename','')}]  {it.get('title','')}  —  {it.get('author','')}",
             )
         if self._source:
             self.listbox.selection_set(0)
@@ -813,6 +815,14 @@ class MusicApp:
     def _poll_tick(self):
         self.player.tick()
         self.root.after(250, self._poll_tick)
+
+
+def _fmt_dur(s):
+    """B站 时长串 → 规整 'm:ss'（'1:9'→'1:09'）；解析失败原样返回"""
+    sec = _parse_dur(s)
+    if sec < 0:
+        return s
+    return f"{sec // 60}:{sec % 60:02d}"
 
 
 def _fmt(sec):
