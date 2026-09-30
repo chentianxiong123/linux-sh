@@ -70,12 +70,36 @@ def _build_icon_paths():
 
 ICON_DIRS = _build_icon_paths()
 
+# 分类筛选（按 Exec 自动识别生态）
+ECOSYSTEMS = [
+    ("all",     "全部"),
+    ("linux",   "🐧 Linux"),
+    ("wine",    "🍷 Wine"),
+    ("android", "🤖 安卓"),
+    ("chrome",  "🌐 浏览器"),
+]
+
+
+def detect_ecosystem(exec_cmd):
+    """从 Exec 命令判断生态：waydroid→安卓, wine→Wine, chrome/app→浏览器, 否则 Linux 原生"""
+    if not exec_cmd:
+        return "linux"
+    e = exec_cmd
+    if "waydroid" in e:
+        return "android"
+    if "WINEPREFIX" in e or e.lstrip().startswith("wine"):
+        return "wine"
+    if "--app-id" in e or "--app=" in e:
+        return "chrome"
+    return "linux"
+
+
 # 默认图标（找不到时用）
 DEFAULT_ICON_PATH = None
 
 
 def parse_desktop(file_path):
-    """解析 .desktop 文件，提取 Name, Icon, Exec"""
+    """解析 .desktop 文件，提取 Name, Icon, Exec + 生态分类"""
     name = file_path.stem  # 兜底用文件名
     icon = None
     exec_cmd = None
@@ -98,6 +122,7 @@ def parse_desktop(file_path):
         "icon": icon,
         "exec": exec_cmd,
         "path": str(file_path),
+        "ecosystem": detect_ecosystem(exec_cmd),
     }
 
 
@@ -224,6 +249,9 @@ class ToolboxApp:
                 pass
 
         self.items = []
+        self._all_items = []   # 全量（顺序/过滤的源）
+        self._filter = "all"  # 当前分类，默认全部
+        self._filter_btns = {}
         self._selected_idx = -1  # 当前选中的格子索引（-1 = 无）
         self._active_menu = None  # 当前打开的右键菜单
         
@@ -248,6 +276,7 @@ class ToolboxApp:
         self._page_count = 1
         self._page_label = None
         
+        self._build_filter_bar()
         self._build_nav()
         self.load_desktops()
         self.draw_grid()
@@ -270,14 +299,56 @@ class ToolboxApp:
         self.root.destroy()
 
     def load_desktops(self):
-        """扫描 desktop 目录"""
-        self.items = []
+        """扫描 desktop 目录 → 全量 + 加载顺序 + 按当前分类过滤"""
+        self._all_items = []
+        self._filter_set = None  # 标记：顺序恢复后仍按当前 filter 重算
         if not DESKTOP_DIR.exists():
             return
         for f in sorted(DESKTOP_DIR.glob("*.desktop")):
-            self.items.append(parse_desktop(f))
-        # 加载保存的顺序
+            self._all_items.append(parse_desktop(f))
+        # 在全部列表上恢复全局顺序
+        self.items = self._all_items
         self._load_order()
+        self._apply_filter()
+
+    def _build_filter_bar(self):
+        """顶部分类筛选栏（全部 / Linux / Wine / 安卓 / 浏览器）"""
+        bar = tk.Frame(self.root, bg=C_BG)
+        bar.pack(side="top", fill="x", pady=(6, 0))
+        for key, text in ECOSYSTEMS:
+            b = tk.Button(
+                bar, text=text, width=8,
+                bg=C_CARD if key != self._filter else C_ACCENT,
+                fg=C_FG, relief="flat", font=("Microsoft YaHei", 10),
+                activebackground=C_ACCENT, activeforeground="#fff",
+                cursor="hand2",
+                command=lambda k=key: self._set_filter(k))
+            b.pack(side="left", padx=3, pady=2)
+            self._filter_btns[key] = b
+
+    def _set_filter(self, key):
+        """切换分类筛选项"""
+        self._filter = key
+        # 高亮当前分类按钮
+        for k, b in self._filter_btns.items():
+            b.configure(bg=C_ACCENT if k == key else C_CARD)
+        self._apply_filter()
+
+    def _apply_filter(self):
+        """按当前分类过滤 items 并重绘；同时重置选中/分页"""
+        if self._filter == "all":
+            self.items = list(self._all_items)
+        else:
+            self.items = [it for it in self._all_items
+                          if it.get("ecosystem") == self._filter]
+        self._page = 0
+        self._selected_idx = -1
+        self._last_target_tag = None
+        if hasattr(self, "canvas"):
+            self.draw_grid()
+        if hasattr(self, "_empty_label") and self._empty_label:
+            self._empty_label.destroy()
+            self._empty_label = None
 
     def on_drop(self, event):
         """从外部拖入 .desktop 文件：复制进持久化目录 + 刷新网格"""
@@ -691,12 +762,16 @@ class ToolboxApp:
         self._save_order()
 
     def _save_order(self):
-        """保存图标顺序到文件"""
+        """保存图标顺序到文件（先把当前屏幕顺序同步回全量，再落盘）"""
         import json
         from pathlib import Path
+        # 非「全部」视图下拖拽排序了 → 把显示项的新序合并回 _all_items
+        if self._filter != "all" and self.items is not self._all_items:
+            pos = {it['path']: i for i, it in enumerate(self.items)}
+            self._all_items.sort(key=lambda it: pos.get(it['path'], len(pos)))
+        order = [item['path'] for item in self._all_items]
         order_file = Path.home() / ".config" / "toolbox" / "order.json"
         order_file.parent.mkdir(parents=True, exist_ok=True)
-        order = [item['path'] for item in self.items]
         with open(order_file, 'w') as f:
             json.dump(order, f)
 
@@ -808,6 +883,7 @@ class ToolboxApp:
         # 从列表移除
         idx = self.items.index(item)
         self.items.pop(idx)
+        self._save_order()   # 同步 + 落盘
         
         # 调整选中索引
         if self._selected_idx == idx:
