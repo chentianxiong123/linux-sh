@@ -45,30 +45,130 @@ C_OK = "#4ade80"    # 成功
 C_ERR = "#f87171"   # 错误
 
 # 图标搜索：主题 + 目录类型 + 尺寸
-ICON_THEMES = ["breeze-dark", "breeze", "hicolor", "Adwaita"]
-ICON_TYPES = ["devices", "apps", "actions", "categories", "preferences", "places"]
-ICON_SIZES = ["64", "48", "32", "24", "16", "128", "256", "96"]
+def _get_current_theme():
+    """读取桌面当前激活图标主题（官方：kreadconfig = KDE 配置解析）"""
+    if not hasattr(_get_current_theme, "val"):
+        theme = "hicolor"
+        try:
+            import subprocess as sp
+            for tool in ("kreadconfig6", "kreadconfig5"):
+                try:
+                    r = sp.run([tool, "--group", "Icons", "--key", "Theme"],
+                               capture_output=True, text=True, timeout=3)
+                    t = r.stdout.strip()
+                    if t and os.path.exists(f"/usr/share/icons/{t}"):
+                        theme = t
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        _get_current_theme.val = theme
+    return _get_current_theme.val
 
 
-def _build_icon_paths():
-    """生成所有可能的图标路径"""
-    paths = []
-    # hicolor 结构不同
-    for size in ICON_SIZES:
-        paths.append(f"/usr/share/icons/hicolor/{size}x{size}/apps")
-        paths.append(f"/usr/share/icons/hicolor/{size}x{size}/actions")
-    # KDE/Adwaita 结构
-    for theme in ICON_THEMES:
-        if theme == "hicolor":
+_theme_cache = {}
+
+
+def _parse_theme(theme):
+    """读取主题 index.theme → (inherits[], dirs{原名:目录}); 缓存"""
+    if theme not in _theme_cache:
+        idx = f"/usr/share/icons/{theme}/index.theme"
+        inherits = []
+        dirs = {}
+        section = None
+        if os.path.isfile(idx):
+            try:
+                with open(idx, encoding="utf-8", errors="ignore") as f:
+                    for raw in f:
+                        line = raw.strip()
+                        if line.startswith("[") and line.endswith("]"):
+                            section = line[1:-1].strip()
+                            continue
+                        if "=" in line and section:
+                            k, v = line.split("=", 1)
+                            k, v = k.strip(), v.strip()
+                            if section == "Icon Theme":
+                                if k == "Inherits":
+                                    inherits = [x for x in v.split(",") if x]
+                                elif k == "Directories":
+                                    for d in v.split(","):
+                                        if d.strip():
+                                            dirs[d.strip()] = {}
+                            elif section in dirs:
+                                if k == "Size":
+                                    try:
+                                        dirs[section]["Size"] = int(v)
+                                    except ValueError:
+                                        pass
+            except Exception:
+                pass
+        _theme_cache[theme] = (inherits, dirs)
+    return _theme_cache[theme]
+
+
+def _theme_file(theme, name):
+    """在指定主题里搜 name 图标（用户级 ~/.local/share/icons 优先，再系统 /usr/share/icons）"""
+    _, dirs = _parse_theme(theme)
+    home = os.path.expanduser("~")
+    bases = [f"{home}/.local/share/icons/{theme}",
+             f"/usr/share/icons/{theme}"]
+    for td in bases:
+        if not os.path.isdir(td):
             continue
-        for itype in ICON_TYPES:
-            for size in ICON_SIZES:
-                paths.append(f"/usr/share/icons/{theme}/{itype}/{size}")
-    paths.append("/usr/share/pixmaps")
-    return paths
+        best, best_sz = None, None
+        for d, meta in (dirs or {}).items():
+            for ext in (".svg", ".png", ".xpm"):
+                p = os.path.join(td, d, name + ext)
+                if os.path.isfile(p):
+                    if ext == ".svg":   # 矢量优先
+                        return p
+                    sz = meta.get("Size", 64)
+                    if best is None or abs(sz - ICON_SIZE) < best_sz:
+                        best, best_sz = p, abs(sz - ICON_SIZE)
+        if best:
+            return best
+        # 目录未声明时兑底：全树搜索
+        for root, _, files in os.walk(td):
+            if "cursors" in root:
+                continue
+            for fn in files:
+                base, ext = os.path.splitext(fn)
+                if base == name and ext.lower() in (".svg", ".png", ".xpm"):
+                    return os.path.join(root, fn)
+    return None
 
 
-ICON_DIRS = _build_icon_paths()
+def _resolve_icon(name):
+    """Freedesktop 规范：当前主题 → 继承链 → hicolor → pixmaps 兜底
+    返回文件路径或 None"""
+    current = _get_current_theme()
+    order = []
+    seen = set()
+    def add(t):
+        if t and t not in seen:
+            seen.add(t)
+            order.append(t)
+    add(current)
+    stack = [current]
+    while stack:
+        t = stack.pop()
+        if t in seen:
+            continue
+        add(t)
+        inh, _ = _parse_theme(t)
+        for x in inh:
+            if x not in seen:
+                stack.append(x)
+    add("hicolor")   # 规范兜底主题
+    for th in order:
+        hit = _theme_file(th, name)
+        if hit:
+            return hit
+    p = os.path.join("/usr/share/pixmaps", name + ".png")
+    if os.path.isfile(p):
+        return p
+    return None
 
 # 分类筛选（按 Exec 自动识别生态）
 ECOSYSTEMS = [
@@ -126,40 +226,23 @@ def parse_desktop(file_path):
 
 
 def find_icon(icon_name):
-    """在系统目录查找图标文件，返回 PIL Image 或 None
-    
-    支持 PNG（直接加载）和 SVG（用 rsvg-convert 转 PNG）
-    """
+    """按桌面图标主题规范查找图标（同 KDE 行为）：当前主题→继承链→hicolor→pixmaps
+    返回 PIL Image 或 None；SVG 用 rsvg-convert 转 PNG"""
     if not icon_name or not Image:
         return None
-
-    # 如果是完整路径，直接加载
+    # 完整路径直接加载
     if os.path.isfile(icon_name):
         return _load_image(icon_name)
-
-    # 在常见目录搜索
-    for icon_dir in ICON_DIRS:
-        for ext in [".png", ".svg", ".xpm"]:
-            path = os.path.join(icon_dir, icon_name + ext)
-            if os.path.isfile(path):
-                img = _load_image(path)
-                if img:
-                    return img
-            # 有些图标带 @2x 后缀
-            path2 = os.path.join(icon_dir, icon_name + "@2x" + ext)
-            if os.path.isfile(path2):
-                img = _load_image(path2)
-                if img:
-                    return img
-        # 单数/复数兜底（如 shortcuts → shortcut）
-        singular = icon_name[:-1] if icon_name.endswith("s") else icon_name + "s"
-        for ext in [".png", ".svg", ".xpm"]:
-            path = os.path.join(icon_dir, singular + ext)
-            if os.path.isfile(path):
-                img = _load_image(path)
-                if img:
-                    return img
-
+    # 命名 → 规范解析
+    variants = [icon_name]
+    # 单复数兜底（如 shortcuts → shortcut）
+    variants.append(icon_name[:-1] if icon_name.endswith("s") else icon_name + "s")
+    for name in variants:
+        p = _resolve_icon(name)
+        if p:
+            img = _load_image(p)
+            if img:
+                return img
     return None
 
 
