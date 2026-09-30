@@ -1,0 +1,8 @@
+[Desktop Entry]
+Version=1.0
+Terminal=false
+Type=Application
+Name=哔哩哔哩
+Exec=/opt/google/chrome/google-chrome --profile-directory=Default --app-id=ajkmnmhomjhgjdghpmjpjpcmdiicbdeb
+Icon=chrome-ajkmnmhomjhgjdghpmjpjpcmdiicbdeb-Default
+StartupWMClass=crx_ajkmnmhomjhgjdghpmjpjpcmdiicbdeb
