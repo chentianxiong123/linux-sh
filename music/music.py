@@ -25,6 +25,31 @@ import requests
 
 # ── 收藏：只存 ID/标题，不缓存音频 ────────────────
 FAV_FILE = Path.home() / ".config" / "music" / "favorites.json"
+CFG_FILE = Path.home() / ".config" / "music" / "settings.json"   # 音量等偏好
+DEFAULT_VOLUME = 100
+
+
+def _load_pref():
+    """读取偏好设置（当前只存音量）"""
+    try:
+        if CFG_FILE.exists():
+            with open(CFG_FILE) as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                return d
+    except Exception:
+        pass
+    return {}
+
+
+def _save_pref(pref):
+    """写偏好设置，ensure_ascii=True 防非法字符"""
+    try:
+        CFG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(CFG_FILE, "w", encoding="utf-8") as f:
+            json.dump(pref, f, ensure_ascii=True)
+    except Exception as e:
+        print(f"[设置保存失败] {e}", file=sys.stderr)
 
 
 def _load_favs():
@@ -194,6 +219,7 @@ class Player:
         self.started_at = 0.0
         self.paused = False
         self._pause_started = 0.0  # 本次暂停开始的时间（计时补偿用）
+        self._volume = 100.0       # 音量 0-100（mpv 原生属性）
         self._tick_cb = on_tick
         self._end_cb = on_end
         self._ipc_path = f"/tmp/music-mpv-{os.getpid()}.sock"
@@ -277,6 +303,7 @@ class Player:
             if self.mpv.poll() is not None or os.path.exists(self._ipc_path):
                 break
             time.sleep(0.1)
+        self.set_volume(self._volume)   # 启动后套用音量和静音状态
         self.started_at = time.time()
 
     def pause(self):
@@ -332,6 +359,14 @@ class Player:
         self.started_at = 0.0
         self.offset = 0.0
 
+    def set_volume(self, vol, mute=None):
+        """音量 0-100：mpv 原生 volume 属性，一条 IPC 即生效"""
+        self._volume = max(0.0, min(100.0, float(vol)))
+        if self.mpv is not None and self.mpv.poll() is None:
+            self._ipc(["set_property", "volume", self._volume])
+            if mute is not None:
+                self._ipc(["set_property", "mute", bool(mute)])
+
     def is_playing(self):
         return self.mpv is not None and self.mpv.poll() is None
 
@@ -380,7 +415,10 @@ class MusicApp:
         self._mode = "search"        # 列表模式: search / fav
         self._source = self.results  # 当前列表数据源（搜索/收藏共用）
         self._play_mode = "order"    # 播放模式: order循环 / random随机 / single单曲
+        self.volume = int(_load_pref().get("volume", DEFAULT_VOLUME))
+        self.vol_pct = None   # 在 _build 里创建，滑杆回调可能先触发
         self.player = Player(on_tick=self._on_tick, on_end=self._on_end)
+        self.player.set_volume(self.volume)
         self._build()
         self._poll_tick()
 
@@ -470,9 +508,22 @@ class MusicApp:
                             fg=C["muted"], bg=C["card"])
         self.tot.pack(side="right")
 
-        self.vol = tk.Label(player, text="🔊 音量 100%", font=("Microsoft YaHei", 9),
-                            fg=C["muted"], bg=C["card"])
-        self.vol.pack(fill="x", padx=12, pady=(0, 8))
+        # 音量滑块（mpv 原生 volume，0-100）+ 百分比显示
+        vol_row = tk.Frame(player, bg=C["card"])
+        vol_row.pack(fill="x", padx=12, pady=(0, 8))
+        tk.Label(vol_row, text="🔊", font=("Microsoft YaHei", 11),
+                 fg=C["muted"], bg=C["card"]).pack(side="left")
+        self.vol_slider = tk.Scale(
+            vol_row, from_=0, to=100, orient="horizontal",
+            showvalue=False, bd=0, highlightthickness=0,
+            bg=C["card"], fg=C["fg"], troughcolor="#2a2a4a",
+            activebackground=C["accent"],
+            command=self._set_volume)
+        self.vol_slider.set(self.volume)
+        self.vol_slider.pack(side="left", fill="x", expand=True, padx=8)
+        self.vol_pct = tk.Label(vol_row, text=f"{self.volume}%",
+                              font=("Microsoft YaHei", 9), fg=C["muted"], bg=C["card"])
+        self.vol_pct.pack(side="left")
 
         # ── 控制按钮（统一等宽：播放模式 / 播放暂停 / 收藏） ──
         ctrl = tk.Frame(player, bg=C["card"])
@@ -491,6 +542,18 @@ class MusicApp:
             self.btn[key] = b
 
     # ── 事件 ──
+    def _set_volume(self, val):
+        """音量滑块回调：套用 mpv + 更新显示 + 持久化"""
+        try:
+            v = int(float(val))
+        except ValueError:
+            return
+        self.volume = v
+        self.player.set_volume(v)
+        if self.vol_pct is not None:
+            self.vol_pct.configure(text=f"{v}%")
+        _save_pref({**_load_pref(), "volume": v})
+
     def _search(self):
         """搜索：切回搜索模式，填充共用列表"""
         kw = self.entry.get().strip()
