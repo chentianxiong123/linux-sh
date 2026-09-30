@@ -1,0 +1,20 @@
+[Desktop Entry]
+Categories=Settings;HardwareSettings;
+Comment[zh_CN]=联想小新 Air 14 电池与性能模式管理工具
+Comment=联想小新 Air 14 电池与性能模式管理工具
+Exec=/home/a1/sh/battery/battery.sh
+GenericName[zh_CN]=
+GenericName=
+Icon=preferences-system-power-management
+MimeType=
+Name[zh_CN]=电池管理
+Name=电池管理
+Path=
+StartupName=电池管理
+StartupNotify=true
+StartupWMClass=battery-manager
+Terminal=false
+TerminalOptions=
+Type=Application
+X-KDE-SubstituteUID=false
+X-KDE-Username=

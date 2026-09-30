@@ -212,6 +212,9 @@ class Player:
             for p in (self.paplay, self.ffmpeg):
                 if p and p.poll() is None:
                     try:
+                        # 先恢复（如果之前被 SIGSTOP 暂停过）
+                        os.kill(p.pid, signal.SIGCONT)
+                        # 再杀掉
                         os.kill(p.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
@@ -257,12 +260,18 @@ class MusicApp:
         self.root.title("B站音乐")
         self.root.geometry("720x620")
         self.root.configure(bg=C["bg"])
+        self.root.wm_protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.results = []
         self.current = None
         self.player = Player(on_tick=self._on_tick, on_end=self._on_end)
         self._build()
         self._poll_tick()
+
+    def _on_close(self):
+        """窗口关闭时清理所有进程"""
+        self.player.stop()
+        self.root.destroy()
 
     def _build(self):
         pad = {"padx": 12, "pady": 6}

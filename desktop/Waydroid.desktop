@@ -1,0 +1,20 @@
+[Desktop Entry]
+Categories=Emulator;System;
+Comment[zh_CN]=安卓 (Waydroid) 机型切换 · X11 嵌套 Weston
+Comment=安卓 (Waydroid) 机型切换 · X11 嵌套 Weston
+Exec=/home/a1/sh/waydroid/waydroid-android
+GenericName[zh_CN]=
+GenericName=
+Icon=phone
+MimeType=
+Name[zh_CN]=安卓桌面
+Name=安卓桌面
+Path=
+StartupName=安卓桌面
+StartupNotify=true
+StartupWMClass=waydroid-android
+Terminal=false
+TerminalOptions=
+Type=Application
+X-KDE-SubstituteUID=false
+X-KDE-Username=

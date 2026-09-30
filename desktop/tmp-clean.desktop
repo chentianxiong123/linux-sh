@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=清理 tmp
+Exec=/home/a1/sh/clean/tmp-clean.sh
+Icon=edit-delete
+Terminal=false
+Comment=一键清空 /tmp (不需要 sudo)
+Categories=System;
+StartupWMClass=tmp-clean
+StartupNotify=false

@@ -1,0 +1,20 @@
+[Desktop Entry]
+Categories=AudioVideo;Player;
+Comment[zh_CN]=B站音乐搜索播放器 (ffmpeg + paplay)
+Comment=B站音乐搜索播放器 (ffmpeg + paplay)
+Exec=python3 /home/a1/sh/music/music.py
+GenericName[zh_CN]=
+GenericName=
+Icon=multimedia-player
+MimeType=
+Name[zh_CN]=音乐
+Name=音乐
+Path=
+StartupName=音乐
+StartupNotify=false
+StartupWMClass=music.py
+Terminal=false
+TerminalOptions=
+Type=Application
+X-KDE-SubstituteUID=false
+X-KDE-Username=

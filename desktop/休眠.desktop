@@ -1,0 +1,8 @@
+[Desktop Entry]
+Comment=切换休眠状态
+Exec=/home/a1/sh/sleep/sleep-toggle.sh
+Icon=system-suspend
+Name[zh_CN]=休眠
+Name=休眠
+Terminal=false
+Type=Application

@@ -1,0 +1,19 @@
+[Desktop Entry]
+Categories=System;
+Comment[zh_CN]=便捷 SSH 连接管理器
+Comment=便捷 SSH 连接管理器
+Exec=python3 /home/a1/sh/ssh/ssh-manage.py
+GenericName[zh_CN]=
+GenericName=
+Icon=utilities-terminal
+MimeType=
+Name[zh_CN]=SSH管理器
+Name=SSH管理器
+Path=
+StartupNotify=false
+StartupWMClass=ssh-manage.py
+Terminal=false
+TerminalOptions=
+Type=Application
+X-KDE-SubstituteUID=false
+X-KDE-Username=

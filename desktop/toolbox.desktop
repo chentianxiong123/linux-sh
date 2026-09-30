@@ -1,0 +1,10 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Type=Application
+Name=Toolbox
+GenericName=工具启动器
+Comment=极简工具管理
+Icon=/home/a1/sh/toolbox/toolbox-icon.png
+Exec=python3 /home/a1/sh/toolbox/toolbox.py
+Terminal=false
+Categories=System;Utility;

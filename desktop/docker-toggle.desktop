@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Docker
+Exec=/home/a1/sh/docker/docker-toggle.sh
+Icon=/home/a1/sh/docker/docker.png
+Terminal=false
+Comment=切换Docker状态

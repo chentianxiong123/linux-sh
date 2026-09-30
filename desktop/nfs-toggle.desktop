@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=NFS挂载
+Exec=/home/a1/sh/nfs/nfs-toggle.sh
+Icon=folder-network
+Terminal=false
+Comment=切换NFS挂载状态

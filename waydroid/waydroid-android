@@ -331,6 +331,7 @@ class App(tk.Tk):
         self.title("安卓桌面")
         self.resizable(False, False)
         self.configure(bg=C["bg"])
+        self.wm_protocol("WM_DELETE_WINDOW", self._on_close)
         self._timer = None
         self._busy = False
         self._sock = None
@@ -605,6 +606,15 @@ class App(tk.Tk):
     def _loop(self):
         self._refresh()
         self._timer = self.after(3000, self._loop)
+
+    def _on_close(self):
+        """窗口关闭时清理 weston 和 waydroid session"""
+        try:
+            kill_weston()
+            run(["waydroid", "session", "stop"], timeout=10)
+        except Exception:
+            pass
+        self.destroy()
 
     def destroy(self):
         if self._timer:

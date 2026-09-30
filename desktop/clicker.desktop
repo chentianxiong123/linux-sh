@@ -1,0 +1,20 @@
+[Desktop Entry]
+Categories=Utility;
+Comment[zh_CN]=鼠标自动连点器
+Comment=鼠标自动连点器
+Exec=/home/a1/sh/clicker/clicker-launcher.sh
+GenericName[zh_CN]=
+GenericName=
+Icon=preferences-desktop-keyboard-shortcuts
+MimeType=
+Name[zh_CN]=连点器
+Name=连点器
+Path=
+StartupName=连点器
+StartupNotify=true
+StartupWMClass=clicker
+Terminal=false
+TerminalOptions=
+Type=Application
+X-KDE-SubstituteUID=false
+X-KDE-Username=
