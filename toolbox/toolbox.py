@@ -368,12 +368,19 @@ class ToolboxApp:
 
     def _on_release(self, event, item, grid_idx):
         """松开：完成拖拽或单击/双击"""
-        if self._is_dragging:
-            # 完成拖拽
-            self._complete_drop(event)
+        was_dragging = self._is_dragging
+        try:
+            if was_dragging:
+                # 完成拖拽
+                self._complete_drop(event)
+        finally:
+            # 无论是否异常，都移除拖拽视觉 + 重置状态
             self._remove_drag_visual()
-        else:
-            # 单击/双击检测
+            self._drag_item = None
+            self._is_dragging = False
+        
+        # 单击/双击检测（只有非拖拽路径才执行）
+        if not was_dragging:
             now = time.time()
             if (self._last_click_time is not None and
                 self._last_click_item == item and
@@ -387,10 +394,6 @@ class ToolboxApp:
                 self.select(item, grid_idx)
                 self._last_click_time = now
                 self._last_click_item = item
-        
-        # 重置拖拽状态
-        self._drag_item = None
-        self._is_dragging = False
 
     def _create_drag_visual(self, event):
         """创建拖拽视觉（半透明图标跟随鼠标）"""
@@ -400,22 +403,26 @@ class ToolboxApp:
         ids.append(self.canvas.create_rectangle(
             event.x - 40, event.y - 40, event.x + 40, event.y + 40,
             fill="#2a3f6e", outline=C_ACCENT, width=2,
+            tags="drag_visual",
         ))
         # 图标（保存引用防止 GC）
         photo = self.make_photo(item)
         self._drag_photo = photo
         if photo:
             ids.append(self.canvas.create_image(
-                event.x, event.y - 10, image=photo, anchor="center"
+                event.x, event.y - 10, image=photo, anchor="center",
+                tags="drag_visual",
             ))
         else:
             ids.append(self.canvas.create_text(
-                event.x, event.y - 10, text="📦", font=("Segoe UI Emoji", 24)
+                event.x, event.y - 10, text="📦", font=("Segoe UI Emoji", 24),
+                tags="drag_visual",
             ))
         # 文字
         name = item["name"][:8]
         ids.append(self.canvas.create_text(
-            event.x, event.y + 20, text=name, font=("Microsoft YaHei", 9), fill=C_FG
+            event.x, event.y + 20, text=name, font=("Microsoft YaHei", 9), fill=C_FG,
+            tags="drag_visual",
         ))
         self._drag_ids = ids
 
@@ -432,11 +439,10 @@ class ToolboxApp:
         self.canvas.coords(self._drag_ids[2], event.x, event.y + 20)
 
     def _remove_drag_visual(self):
-        """移除拖拽视觉"""
-        if self._drag_ids:
-            for cid in self._drag_ids:
-                self.canvas.delete(cid)
-            self._drag_ids = []
+        """移除拖拽视觉（用统一 tag 兜底删除）"""
+        # 兜底：删除所有带 drag_visual tag 的元素（防止残留）
+        self.canvas.delete("drag_visual")
+        self._drag_ids = []
         self._drag_photo = None
 
     def _highlight_drop_target(self, event):
