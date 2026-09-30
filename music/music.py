@@ -14,6 +14,7 @@ import json
 import re
 import signal
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -47,10 +48,12 @@ def _save_fav(entry):
         favs = _load_favs()
         favs = [f for f in favs if f.get("bvid") != entry.get("bvid")]
         favs.insert(0, entry)
-        with open(FAV_FILE, "w") as f:
-            json.dump(favs, f, ensure_ascii=False)
-    except Exception:
-        pass
+        # ensure_ascii=True：任何 unicode（含孤儿代理项）都转义存储，绝不抛错
+        # B站标题可能含 \ud800 之类非法字符，ensure_ascii=False 写入会 UnicodeEncodeError
+        with open(FAV_FILE, "w", encoding="utf-8") as f:
+            json.dump(favs, f, ensure_ascii=True)
+    except Exception as e:
+        print(f"[收藏保存失败] {e}", file=sys.stderr)
 
 
 def _remove_fav(bvid):
@@ -58,10 +61,10 @@ def _remove_fav(bvid):
     try:
         favs = _load_favs()
         favs = [f for f in favs if f.get("bvid") != bvid]
-        with open(FAV_FILE, "w") as f:
-            json.dump(favs, f, ensure_ascii=False)
-    except Exception:
-        pass
+        with open(FAV_FILE, "w", encoding="utf-8") as f:
+            json.dump(favs, f, ensure_ascii=True)
+    except Exception as e:
+        print(f"[收藏删除失败] {e}", file=sys.stderr)
 
 # ── B站 API ──────────────────────────────────────────────
 BUILTIN_HEADERS = {
