@@ -279,6 +279,7 @@ class ToolboxApp:
         canvas.create_rectangle(
             x0, y0, x1, y1,
             fill=C_CARD, outline="",
+            tags=tag,
         )
 
         # 2. 高亮层（在背景之上，图标之下）
@@ -292,10 +293,10 @@ class ToolboxApp:
         photo = self.make_photo(item)
         if photo:
             iy = cy - 15
-            canvas.create_image(cx, iy, image=photo, anchor="center")
+            canvas.create_image(cx, iy, image=photo, anchor="center", tags=tag)
             setattr(self, f"_img_{grid_idx}", photo)  # 防止 GC
         else:
-            canvas.create_text(cx, cy - 15, text="📦", font=("Segoe UI Emoji", 28), fill=C_FG)
+            canvas.create_text(cx, cy - 15, text="📦", font=("Segoe UI Emoji", 28), fill=C_FG, tags=tag)
 
         # 4. 文字
         name = item["name"]
@@ -306,6 +307,7 @@ class ToolboxApp:
             text=name,
             font=("Microsoft YaHei", 9),
             fill=C_FG,
+            tags=tag,
         )
 
         # 5. 点击区域（最上层，透明）
@@ -514,7 +516,7 @@ class ToolboxApp:
                     new_items.append(path_to_item[path])
             # 添加未在保存顺序中的新文件
             for item in self.items:
-                if item not in new_items:
+                if item['path'] not in order:
                     new_items.append(item)
             self.items = new_items
         except Exception:
