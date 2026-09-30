@@ -133,6 +133,20 @@ def _req(url, **kw):
     return r
 
 
+MAX_SEARCH_MIN = 20  # 短时长优先：超过这个时长的结果直接滤掉（课程/长直播）
+
+
+def _parse_dur(s):
+    """B站 时长串 'mm:ss' / 'h:mm:ss' → 秒；解析失败返回 -1"""
+    try:
+        sec = 0
+        for v in s.strip().split(":"):
+            sec = sec * 60 + int(v)
+        return sec
+    except Exception:
+        return -1
+
+
 def _search(keyword):
     r = _req(API["search"], params={
         "keyword": keyword,
@@ -149,7 +163,11 @@ def _search(keyword):
             "title": _tag_re.sub("", it.get("title", "")),
             "duration": it.get("duration", ""),
             "author": it.get("author", ""),
+            "sec": _parse_dur(it.get("duration", "")),
         })
+    # 短时长优先：滤掉超长/时长解析失败，剩余按时长升序
+    out = [it for it in out if 0 < it["sec"] <= MAX_SEARCH_MIN * 60]
+    out.sort(key=lambda it: it["sec"])
     return out
 
 
@@ -795,14 +813,6 @@ class MusicApp:
     def _poll_tick(self):
         self.player.tick()
         self.root.after(250, self._poll_tick)
-
-
-def _parse_dur(s):
-    try:
-        m, sec = s.split(":")
-        return int(m) * 60 + int(sec)
-    except Exception:
-        return 0
 
 
 def _fmt(sec):
