@@ -211,6 +211,11 @@ class ToolboxApp:
 
         self.items = []
         self._selected_idx = -1  # 当前选中的格子索引（-1 = 无）
+        self._active_menu = None  # 当前打开的右键菜单
+        
+        # 点击窗口任意处关闭右键菜单
+        self.root.bind("<Button-1>", lambda e: self._close_menu())
+        self.root.bind("<FocusOut>", lambda e: self._close_menu())
         
         # 拖拽状态
         self._drag_item = None
@@ -599,7 +604,9 @@ class ToolboxApp:
         self.canvas.itemconfig(f"hl_{idx}", fill="#1e2f5e", outline=C_ACCENT)
 
     def show_menu(self, event, item):
-        """右键菜单：极简两项，失去焦点自动消失"""
+        """右键菜单：极简两项，点击外部/失焦自动关闭"""
+        self._close_menu()
+        
         menu = tk.Menu(self.root, tearoff=0)
         
         # 复制地址
@@ -609,12 +616,18 @@ class ToolboxApp:
         # 删除此工具
         menu.add_command(label="🗑 删除此工具", command=lambda: self.delete_item(item))
         
-        # tk_popup：点击菜单外自动关闭（grab 保持期间才生效）
-        try:
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            # 延迟释放 grab：菜单 unpost 后再释放，点击外部才能自动关闭
-            self.root.after(100, menu.grab_release)
+        self._active_menu = menu
+        # post 模式（无 grab），配合 root 的 Button-1/FocusOut 关闭
+        menu.post(event.x_root, event.y_root)
+
+    def _close_menu(self):
+        """关闭当前打开的右键菜单"""
+        if self._active_menu:
+            try:
+                self._active_menu.unpost()
+            except Exception:
+                pass
+            self._active_menu = None
 
     def copy_path(self, item):
         """复制 .desktop 文件路径到剪贴板"""
