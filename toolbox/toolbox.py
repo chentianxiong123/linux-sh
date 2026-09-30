@@ -29,6 +29,8 @@ C_CARD = "#16213e"
 C_FG = "#e0e0ff"
 C_MUTED = "#8888aa"
 C_ACCENT = "#7b68ee"
+C_OK = "#4ade80"    # 成功
+C_ERR = "#f87171"   # 错误
 
 # 图标搜索：主题 + 目录类型 + 尺寸
 ICON_THEMES = ["breeze-dark", "breeze", "hicolor", "Adwaita"]
@@ -296,6 +298,7 @@ class ToolboxApp:
         # 绑定事件
         canvas.tag_bind(click_tag, "<Double-Button-1>", lambda e, i=item: self.launch(i))
         canvas.tag_bind(click_tag, "<Button-1>", lambda e, i=item: self.select(i, tag))
+        canvas.tag_bind(click_tag, "<Button-3>", lambda e, i=item: self.show_menu(e, i))
         canvas.tag_bind(click_tag, "<Enter>", lambda e, t=tag: self.on_hover(t, True))
         canvas.tag_bind(click_tag, "<Leave>", lambda e, t=tag: self.on_hover(t, False))
 
@@ -329,6 +332,106 @@ class ToolboxApp:
         # 选中当前
         self._selected_tag = tag
         self.canvas.itemconfig(tag, fill="#1e2f5e", outline=C_ACCENT)
+
+    def show_menu(self, event, item):
+        """右键菜单"""
+        menu = tk.Menu(self.root, tearoff=0)
+        
+        # 显示命令
+        menu.add_command(label="👁 查看命令", command=lambda: self.show_command(item))
+        menu.add_separator()
+        
+        # 复制选项
+        menu.add_command(label="📋 复制命令", command=lambda: self.copy_command(item))
+        menu.add_command(label="📄 复制路径", command=lambda: self.copy_path(item))
+        menu.add_separator()
+        
+        # 目录操作
+        menu.add_command(label="📂 打开所在目录", command=lambda: self.open_directory(item))
+        
+        # 在鼠标位置显示菜单
+        menu.post(event.x_root, event.y_root)
+
+    def show_command(self, item):
+        """弹窗显示 Exec 命令"""
+        cmd = item.get("exec", "")
+        if not cmd:
+            tk.messagebox.showwarning("无命令", f"{item['name']} 没有 Exec 字段")
+            return
+        
+        win = tk.Toplevel(self.root)
+        win.title(f"命令 - {item['name']}")
+        win.geometry("600x200")
+        win.configure(bg=C_BG)
+        
+        tk.Label(win, text="Exec 命令:", font=("Microsoft YaHei", 11, "bold"),
+                 fg=C_FG, bg=C_BG).pack(anchor="w", padx=15, pady=(10, 5))
+        
+        txt = tk.Text(win, font=("Consolas", 10), bg=C_CARD, fg=C_FG,
+                      relief="flat", wrap="word", state="normal")
+        txt.pack(fill="both", expand=True, padx=15, pady=5)
+        txt.insert("1.0", cmd)
+        txt.config(state="disabled")
+        
+        # 复制按钮
+        tk.Button(win, text="📋 复制", font=("Microsoft YaHei", 10),
+                  bg=C_ACCENT, fg="#fff", relief="flat",
+                  command=lambda: self._copy_to_clipboard(cmd, win)).pack(pady=10)
+
+    def copy_command(self, item):
+        """复制 Exec 命令到剪贴板"""
+        cmd = item.get("exec", "")
+        if cmd:
+            self._copy_to_clipboard(cmd)
+            self._show_notification(f"已复制命令: {item['name']}")
+        else:
+            self._show_notification("无命令可复制", True)
+
+    def copy_path(self, item):
+        """复制 .desktop 文件路径到剪贴板"""
+        path = item.get("path", "")
+        if path:
+            self._copy_to_clipboard(path)
+            self._show_notification(f"已复制路径: {item['name']}")
+        else:
+            self._show_notification("无路径可复制", True)
+
+    def open_directory(self, item):
+        """打开 .desktop 文件所在目录"""
+        path = item.get("path", "")
+        if path:
+            import os
+            import subprocess
+            dir_path = os.path.dirname(path)
+            # 尝试用 xdg-open 打开目录
+            try:
+                subprocess.Popen(["xdg-open", dir_path],
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL,
+                               start_new_session=True)
+            except Exception:
+                # 兜底：用 dolphin
+                try:
+                    subprocess.Popen(["dolphin", dir_path],
+                                   stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL,
+                                   start_new_session=True)
+                except Exception as e:
+                    tk.messagebox.showerror("打开失败", str(e))
+
+    def _copy_to_clipboard(self, text, win=None):
+        """复制到剪贴板"""
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        if win:
+            win.destroy()
+
+    def _show_notification(self, msg, is_error=False):
+        """顶部提示"""
+        lbl = tk.Label(self.root, text=msg, font=("Microsoft YaHei", 10, "bold"),
+                      fg=C_ERR if is_error else C_OK, bg=C_CARD, relief="flat")
+        lbl.place(relx=0.5, y=6, anchor="n")
+        lbl.after(2000, lbl.destroy)
 
     def launch(self, item):
         """双击启动工具（脱离父进程会话）"""
