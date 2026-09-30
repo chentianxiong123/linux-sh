@@ -284,12 +284,14 @@ class ToolboxApp:
             if item:
                 self.draw_cell(self.canvas, item, x, y, idx)
             else:
-                # 空格子：画个淡色背景
+                # 空格子：画个淡色背景 + 创建 tag（用于拖拽高亮）
                 x0, y0 = x - CELL_W // 2 + 10, y - CELL_H // 2 + 10
                 x1, y1 = x + CELL_W // 2 - 10, y + CELL_H // 2 - 10
+                tag = f"cell_{idx}"
                 self.canvas.create_rectangle(
                     x0, y0, x1, y1,
                     fill="#1a2240", outline="",
+                    tags=tag,
                 )
 
     def draw_cell(self, canvas, item, cx, cy, grid_idx):
@@ -361,9 +363,6 @@ class ToolboxApp:
         self._drag_start_x = event.x
         self._drag_start_y = event.y
         self._is_dragging = False
-        # 清除上次双击检测
-        self._last_click_time = None
-        self._last_click_item = None
 
     def _on_drag(self, event):
         """拖动中：超过阈值则开始拖拽"""
@@ -535,10 +534,12 @@ class ToolboxApp:
                 idx = int(idx_str)
                 if path in path_to_item:
                     self._grid_items[idx] = path_to_item[path]
-            # 添加未在保存布局中的新文件
+            # 添加未在保存布局中的新文件（用 max(index) + 1）
+            next_idx = max(self._grid_items.keys()) + 1 if self._grid_items else 0
             for item in self.items:
                 if item not in self._grid_items.values():
-                    self._grid_items[len(self._grid_items)] = item
+                    self._grid_items[next_idx] = item
+                    next_idx += 1
         except Exception:
             self._init_grid()
 
