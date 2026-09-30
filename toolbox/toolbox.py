@@ -72,7 +72,6 @@ ICON_DIRS = _build_icon_paths()
 
 # 分类筛选（按 Exec 自动识别生态）
 ECOSYSTEMS = [
-    ("all",     "全部"),
     ("linux",   "🐧 Linux"),
     ("wine",    "🍷 Wine"),
     ("android", "🤖 安卓"),
@@ -250,7 +249,7 @@ class ToolboxApp:
 
         self.items = []
         self._all_items = []   # 全量（顺序/过滤的源）
-        self._filter = "all"  # 当前分类，默认全部
+        self._filter = "linux"  # 当前分类，默认 Linux
         self._filter_btns = {}
         self._selected_idx = -1  # 当前选中的格子索引（-1 = 无）
         self._active_menu = None  # 当前打开的右键菜单
@@ -300,12 +299,11 @@ class ToolboxApp:
 
     def load_desktops(self):
         """扫描 desktop 目录 → 全量 + 加载顺序 + 按当前分类过滤"""
-        self._all_items = []
         self._filter_set = None  # 标记：顺序恢复后仍按当前 filter 重算
         if not DESKTOP_DIR.exists():
             return
-        for f in sorted(DESKTOP_DIR.glob("*.desktop")):
-            self._all_items.append(parse_desktop(f))
+        self._all_items = [parse_desktop(f)
+                           for f in sorted(DESKTOP_DIR.glob("*.desktop"))]
         # 在全部列表上恢复全局顺序
         self.items = self._all_items
         self._load_order()
@@ -336,15 +334,13 @@ class ToolboxApp:
 
     def _apply_filter(self):
         """按当前分类过滤 items 并重绘；同时重置选中/分页"""
-        if self._filter == "all":
-            self.items = list(self._all_items)
-        else:
-            self.items = [it for it in self._all_items
-                          if it.get("ecosystem") == self._filter]
+        self.items = [it for it in self._all_items
+                      if it.get("ecosystem") == self._filter]
         self._page = 0
         self._selected_idx = -1
         self._last_target_tag = None
-        if hasattr(self, "canvas"):
+        has_canvas = hasattr(self, "canvas")
+        if has_canvas:
             self.draw_grid()
         if hasattr(self, "_empty_label") and self._empty_label:
             self._empty_label.destroy()
@@ -762,13 +758,12 @@ class ToolboxApp:
         self._save_order()
 
     def _save_order(self):
-        """保存图标顺序到文件（先把当前屏幕顺序同步回全量，再落盘）"""
+        """保存图标顺序到文件（把当前显示顺序同步回全量，再落盘）"""
         import json
         from pathlib import Path
-        # 非「全部」视图下拖拽排序了 → 把显示项的新序合并回 _all_items
-        if self._filter != "all" and self.items is not self._all_items:
-            pos = {it['path']: i for i, it in enumerate(self.items)}
-            self._all_items.sort(key=lambda it: pos.get(it['path'], len(pos)))
+        # 当前屏幕顺序合并回全量：显示的按新序，未显示的排末尾保持原序
+        pos = {it['path']: i for i, it in enumerate(self.items)}
+        self._all_items.sort(key=lambda it: pos.get(it['path'], len(pos)))
         order = [item['path'] for item in self._all_items]
         order_file = Path.home() / ".config" / "toolbox" / "order.json"
         order_file.parent.mkdir(parents=True, exist_ok=True)
