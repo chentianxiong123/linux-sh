@@ -599,101 +599,64 @@ class ToolboxApp:
         self.canvas.itemconfig(f"hl_{idx}", fill="#1e2f5e", outline=C_ACCENT)
 
     def show_menu(self, event, item):
-        """右键菜单"""
+        """右键菜单：极简两项"""
         menu = tk.Menu(self.root, tearoff=0)
         
-        # 显示命令
-        menu.add_command(label="👁 查看命令", command=lambda: self.show_command(item))
+        # 复制地址
+        menu.add_command(label="📄 复制地址", command=lambda: self.copy_path(item))
         menu.add_separator()
         
-        # 复制选项
-        menu.add_command(label="📋 复制命令", command=lambda: self.copy_command(item))
-        menu.add_command(label="📄 复制路径", command=lambda: self.copy_path(item))
-        menu.add_separator()
-        
-        # 目录操作
-        menu.add_command(label="📂 打开所在目录", command=lambda: self.open_directory(item))
+        # 删除此工具
+        menu.add_command(label="🗑 删除此工具", command=lambda: self.delete_item(item))
         
         # 在鼠标位置显示菜单
         menu.post(event.x_root, event.y_root)
-
-    def show_command(self, item):
-        """弹窗显示 Exec 命令"""
-        cmd = item.get("exec", "")
-        if not cmd:
-            tk.messagebox.showwarning("无命令", f"{item['name']} 没有 Exec 字段")
-            return
-        
-        win = tk.Toplevel(self.root)
-        win.title(f"命令 - {item['name']}")
-        win.geometry("600x200")
-        win.configure(bg=C_BG)
-        
-        tk.Label(win, text="Exec 命令:", font=("Microsoft YaHei", 11, "bold"),
-                 fg=C_FG, bg=C_BG).pack(anchor="w", padx=15, pady=(10, 5))
-        
-        txt = tk.Text(win, font=("Consolas", 10), bg=C_CARD, fg=C_FG,
-                      relief="flat", wrap="word", state="normal")
-        txt.pack(fill="both", expand=True, padx=15, pady=5)
-        txt.insert("1.0", cmd)
-        txt.config(state="disabled")
-        
-        # 复制按钮
-        tk.Button(win, text="📋 复制", font=("Microsoft YaHei", 10),
-                  bg=C_ACCENT, fg="#fff", relief="flat",
-                  command=lambda: self._copy_to_clipboard(cmd, win)).pack(pady=10)
-
-    def copy_command(self, item):
-        """复制 Exec 命令到剪贴板"""
-        cmd = item.get("exec", "")
-        if cmd:
-            self._copy_to_clipboard(cmd)
-            self._show_notification(f"已复制命令: {item['name']}")
-        else:
-            self._show_notification("无命令可复制", True)
 
     def copy_path(self, item):
         """复制 .desktop 文件路径到剪贴板"""
         path = item.get("path", "")
         if path:
             self._copy_to_clipboard(path)
-            self._show_notification(f"已复制路径: {item['name']}")
+            self._show_notification(f"已复制地址: {item['name']}")
         else:
             self._show_notification("无路径可复制", True)
 
-    def open_directory(self, item):
-        """打开 .desktop 文件所在目录"""
-        path = item.get("path", "")
-        if path:
-            import os
-            import subprocess
-            dir_path = os.path.dirname(path)
-            # 尝试用 xdg-open 打开目录
-            try:
-                subprocess.Popen(["xdg-open", dir_path],
-                               stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL,
-                               stdin=subprocess.DEVNULL,
-                               close_fds=True,
-                               start_new_session=True)
-            except Exception:
-                # 兜底：用 dolphin
-                try:
-                    subprocess.Popen(["dolphin", dir_path],
-                                   stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL,
-                                   stdin=subprocess.DEVNULL,
-                                   close_fds=True,
-                                   start_new_session=True)
-                except Exception as e:
-                    tk.messagebox.showerror("打开失败", str(e))
+    def delete_item(self, item):
+        """删除此工具（确认后删文件 + 从网格移除）"""
+        if not tk.messagebox.askyesno(
+            "删除工具",
+            f"确定删除 [{item['name']}] 吗？\n\n文件: {item['path']}",
+        ):
+            return
+        
+        try:
+            os.remove(item["path"])
+        except Exception as e:
+            self._show_notification(f"删除失败: {e}", True)
+            return
+        
+        # 从列表移除
+        idx = self.items.index(item)
+        self.items.pop(idx)
+        
+        # 调整选中索引
+        if self._selected_idx == idx:
+            self._selected_idx = -1
+        elif self._selected_idx > idx:
+            self._selected_idx -= 1
+        
+        # 重绘 + 恢复选中高亮
+        self.draw_grid()
+        if self._selected_idx >= 0:
+            self.canvas.itemconfig(f"hl_{self._selected_idx}", fill="#1e2f5e", outline=C_ACCENT)
+        
+        self._save_order()
+        self._show_notification(f"已删除: {item['name']}")
 
-    def _copy_to_clipboard(self, text, win=None):
+    def _copy_to_clipboard(self, text):
         """复制到剪贴板"""
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
-        if win:
-            win.destroy()
 
     def _show_notification(self, msg, is_error=False):
         """顶部提示"""
