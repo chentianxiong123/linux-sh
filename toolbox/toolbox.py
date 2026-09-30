@@ -609,11 +609,12 @@ class ToolboxApp:
         # 删除此工具
         menu.add_command(label="🗑 删除此工具", command=lambda: self.delete_item(item))
         
-        # tk_popup：点击菜单外自动关闭（post 不会）
+        # tk_popup：点击菜单外自动关闭（grab 保持期间才生效）
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
-            menu.grab_release()
+            # 延迟释放 grab：菜单 unpost 后再释放，点击外部才能自动关闭
+            self.root.after(100, menu.grab_release)
 
     def copy_path(self, item):
         """复制 .desktop 文件路径到剪贴板"""
