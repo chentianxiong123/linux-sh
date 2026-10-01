@@ -22,40 +22,51 @@ PORT = 39462
 W, H = 960, 116
 
 # ── X11 真穿透：WA_TransparentForMouseEvents 只让 Qt 忽略事件，
-#    不改变 X11 输入区域，下层窗口仍收不到点击。清空 input shape 才真穿透。
+#    必须改 X 输入区域。空 Rectangles 会 BadValue(实测失效)，
+#    正确做法是 XShapeCombineMask + 1x1 全0 pixmap(Electron 同款)。
 _X11 = ctypes.CDLL("libX11.so.6")
 _X11.XOpenDisplay.restype = ctypes.c_void_p
 _X11.XOpenDisplay.argtypes = [ctypes.c_char_p]
 _X11.XFlush.argtypes = [ctypes.c_void_p]
+_X11.XCreateGC.restype = ctypes.c_ulong
+_X11.XCreateGC.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p]
+_X11.XSetForeground.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong]
+_X11.XFillRectangle.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
+                                ctypes.c_int, ctypes.c_int, ctypes.c_uint, ctypes.c_uint]
+_X11.XFreeGC.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+_X11.XFreePixmap.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+_X11.XCreatePixmap.restype = ctypes.c_ulong
+_X11.XCreatePixmap.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+                               ctypes.c_uint, ctypes.c_uint, ctypes.c_uint]
 _dpy = _X11.XOpenDisplay(None)
 _XExt = ctypes.CDLL("libXext.so.6")   # XShape 扩展在 libXext
-_XExt.XShapeCombineRectangles.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
-                                          ctypes.c_int, ctypes.c_int, ctypes.c_int,
-                                          ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+_XExt.XShapeCombineMask.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int,
+                                    ctypes.c_int, ctypes.c_int, ctypes.c_ulong, ctypes.c_int]
 _SHAPE_INPUT = 2
 _SHAPE_SET = 0
 
 
-class XRect(ctypes.Structure):
-    _fields_ = [("x", ctypes.c_short), ("y", ctypes.c_short),
-                ("w", ctypes.c_ushort), ("h", ctypes.c_ushort)]
-
-
-def _input_rects(widget, rects):
-    arr = (XRect * len(rects))(*[XRect(*r) for r in rects]) if rects else None
-    _XExt.XShapeCombineRectangles(_dpy, int(widget.winId()), _SHAPE_INPUT,
-                                 0, 0, arr, len(rects), _SHAPE_SET)
+def _input_pixmap_mask(widget, bits, w, h):
+    """用 1bpp pixmap 设置窗口输入区域：bits=0 → 全穿透；bits=1 → 该区域可点"""
+    wid = int(widget.winId())
+    pm = _X11.XCreatePixmap(_dpy, wid, w, h, 1)
+    gc = _X11.XCreateGC(_dpy, pm, 0, None)
+    _X11.XSetForeground(_dpy, gc, bits)
+    _X11.XFillRectangle(_dpy, pm, gc, 0, 0, w, h)
+    _XExt.XShapeCombineMask(_dpy, wid, _SHAPE_INPUT, 0, 0, pm, _SHAPE_SET)
     _X11.XFlush(_dpy)
+    _X11.XFreeGC(_dpy, gc)
+    _X11.XFreePixmap(_dpy, pm)
 
 
 def input_pass(widget):
     """清空输入区域 → 鼠标完全穿透，下面随便点"""
-    _input_rects(widget, [])
+    _input_pixmap_mask(widget, 0, 1, 1)
 
 
 def input_block(widget):
     """恢复整窗输入（悬停浮现控制条时可点可拖）"""
-    _input_rects(widget, [(0, 0, widget.width(), widget.height())])
+    _input_pixmap_mask(widget, 1, widget.width(), widget.height())
 
 
 class NetThread(QThread):
@@ -195,15 +206,18 @@ class LyricWindow(QWidget):
         self._hover.timeout.connect(self._hover_check)
         self._hover.start(150)
 
-    # ── 面积/穿透终极：窗口裁剪成文字形状（非文字区物理不存在）──
+    # ── 面积/穿透：窗口裁剪成当前句文字形状（与绘制同坐标，不截字）──
     def _apply_mask(self, txt, fm, font):
-        tw = fm.horizontalAdvance(txt)
-        bm = QBitmap(max(4, tw + 24), 56)
+        bm = QBitmap(self.width(), H)          # 与窗口同尺寸，坐标与绘制一致
         bm.fill(Qt.color0)
         p = QPainter(bm)
         p.setPen(Qt.color1)
         p.setFont(font)
-        p.drawText(12, 12 + fm.ascent(), txt)
+        tw = fm.horizontalAdvance(txt)
+        x = max(0, (self.width() - tw) // 2)
+        y_center = H // 2
+        baseline = y_center + (fm.ascent() - fm.descent()) // 2
+        p.drawText(x, baseline, txt)           # 与 paintEvent 同 x/baseline
         p.end()
         self.setMask(bm)
 

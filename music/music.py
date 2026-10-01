@@ -504,6 +504,8 @@ class MusicApp:
         self.player.set_volume(self.volume)
         self._build()
         self._poll_tick()
+        # 启动默认进入收藏夹页面
+        self.root.after(300, self._toggle_favs)
 
     def _on_close(self):
         """窗口关闭：停播放器、关歌词页/候选窗/Qt 挂件"""
