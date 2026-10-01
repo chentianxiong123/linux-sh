@@ -78,12 +78,10 @@ class LyricWindow(QWidget):
         self.t_title = mk("-", lambda: None)
         self.t_title.setStyleSheet("QPushButton{color:#8a8a98;background:transparent;border:none;font-size:11px;}")
         self.t_pause = mk("⏸", self.on_pause)
-        self.t_prev = mk("⏮", lambda: self.cmd(f"step|-1"))
-        self.t_next = mk("⏭", lambda: self.cmd(f"step|1"))
         self.t_minus = mk("−0.5s", lambda: self.on_nudge(-0.5))
         self.t_plus = mk("+0.5s", lambda: self.on_nudge(0.5))
         self.t_close = mk("×", self.cmd_close)
-        for b in (self.t_title, self.t_pause, self.t_prev, self.t_next,
+        for b in (self.t_title, self.t_pause,
                   self.t_minus, self.t_plus, self.t_close):
             bar.addWidget(b)
         ctrl = QWidget(self)
@@ -100,20 +98,21 @@ class LyricWindow(QWidget):
     def paintEvent(self, _e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        cx, cy = W // 2, 112
+        cx, cy = W // 2, 104
         idx = self._current_index()
-        rows = [(-2, 0.35), (-1, 0.55), (0, 1.0), (1, 0.55), (2, 0.35)]
+        # 桌面歌词：当前句 + 附近一句两句
+        rows = [(-1, 0.55), (0, 1.0), (1, 0.55)]
         for off, alpha in rows:
             k = idx + off
             if 0 <= k < len(self.lines):
                 txt = self.lines[k][1]
                 if off == 0:
                     # 当前行：黑色阴影 + 白色大字
-                    p.setFont(QFont("Microsoft YaHei", 26, QFont.Bold))
+                    p.setFont(QFont("Microsoft YaHei", 27, QFont.Bold))
                     p.setPen(QColor(0, 0, 0, 200))
-                    p.drawText(cx + 2, cy + off * 32 + 2 + 2, W, 40, Qt.AlignHCenter, txt)
+                    p.drawText(cx + 2, cy + off * 36 + 2 + 2, W, 44, Qt.AlignHCenter, txt)
                     p.setPen(QColor(255, 255, 255))
-                    p.drawText(cx, cy + off * 32 + 2, W, 40, Qt.AlignHCenter, txt)
+                    p.drawText(cx, cy + off * 36 + 2, W, 44, Qt.AlignHCenter, txt)
                 else:
                     p.setFont(QFont("Microsoft YaHei", 13))
                     a = int(255 * alpha)

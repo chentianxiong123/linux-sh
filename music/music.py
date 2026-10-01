@@ -488,7 +488,7 @@ class MusicApp:
         self._lyric_map = _load_lyric_map()  # bvid → 已选歌词版本
         self._cur_bvid = None    # 当前播放/选词歌曲 bvid
         self._lyric_on = tk.BooleanVar(value=self._lyric_map.get("_on", True))  # 桌面歌词总开关（持久化）
-        self._lyric_list = None  # 歌词页 Listbox
+        self._lyric_canvas = None  # 歌词页 KTV Canvas
         # 桌面透明挂件(Qt 进程)通信
         self._lyr_sock = None
         self._lyr_srv = None
@@ -833,16 +833,22 @@ class MusicApp:
         threading.Thread(target=work, daemon=True).start()
 
     def _open_lyric_picker(self):
-        """主界面🎤歌词按钮：对当前选中歌曲弹歌词候选窗"""
+        """主界面🎤歌词按钮：歌词页入口（已有歌词直接开页，否则选歌词版本）"""
         if self.current is None or not self._source:
             notify(self.root, "⚠️ 先选择歌曲", "err")
             return
         item = self._source[self.current]
+        self._cur_bvid = item.get("bvid")
+        if self._lyric_lines:
+            # 已载歌词：直接开歌词页（不再自动弹任何东西）
+            name = self._lyric_map.get(self._cur_bvid, {}).get("name", "")
+            title = f"{name} — {item.get('author', '')}" if name else item.get("title", "")
+            self._show_lyric_win(title)
+            return
         song, _artist = _title_to_song(item.get("title", ""))
         if not song:
             notify(self.root, "⚠️ 标题无《歌名》，无法搜歌词", "err")
             return
-        self._cur_bvid = item.get("bvid")
         self.info.configure(text=f"⏳ 搜歌词...《{song}》")
 
         def work():
@@ -892,7 +898,7 @@ class MusicApp:
         def keep_on():
             self._lyric_map["_on"] = self._lyric_on.get()   # 开关持久化
             _save_lyric_map(self._lyric_map)
-        tk.Checkbutton(row, text="选定后显示桌面歌词", variable=self._lyric_on,
+        tk.Checkbutton(row, text="播放时自动桌面歌词", variable=self._lyric_on,
                        bg=C["card"], fg=C["fg"], selectcolor=C["card"],
                        activebackground=C["card"], activeforeground=C["fg"],
                        font=("Microsoft YaHei", 9), command=keep_on).pack(side="left")
@@ -901,24 +907,26 @@ class MusicApp:
         self._pick_win = win
 
     def _apply_lyric(self, cand, bvid=None, show_win=True):
-        """选定候选 → 持久化记录；show_win 控制是否显示悬浮歌词"""
+        """选定候选 → 开歌词页 + 持久化；桌面挂件由开关决定（播放时自动）"""
         self._lyric_lines = cand["lines"]
         self._lyric_offset = 0.0
         self._last_lyric = None
         if show_win:
             self._show_lyric_win(f"{cand['name']} — {cand['artist']}")
+        elif self._lyric_on.get():
+            self._push_lyric(f"{cand['name']} — {cand['artist']}")   # 仅挂件
         if bvid:
             self._lyric_map[bvid] = {
                 "id": cand["id"], "name": cand["name"],
                 "artist": cand["artist"], "dur": cand["dur"], "offset": 0.0,
             }
             _save_lyric_map(self._lyric_map)
-            notify(self.root, f"💾 已记住《{cand['name']}》歌词，下次播放自动加载")
+            notify(self.root, f"💾 已记住《{cand['name']}》歌词，播放时自动桌面歌词")
 
     def _autoload_lyric(self, item):
-        """播放时：开关打开且这首已选过歌词版本，自动拉 LRC 并开悬浮窗"""
+        """播放时：开关开着且这首已选过歌词 → 自动出桌面挂件（不弹页面）"""
         if not self._lyric_on.get():
-            return  # 总开关关着：不显示字幕
+            return
         rec = self._lyric_map.get(item.get("bvid", ""))
         if not rec:
             return
@@ -932,43 +940,34 @@ class MusicApp:
         threading.Thread(target=work, daemon=True).start()
 
     def _apply_saved_lyric(self, rec, lines):
-        """应用已存歌词版本"""
+        """应用已存歌词版本 → 只推桌面挂件（自动流程）"""
         self._lyric_lines = lines
         self._lyric_offset = rec.get("offset", 0.0)
         self._last_lyric = None
-        self._show_lyric_win(f"{rec['name']} — {rec['artist']}")
+        self._push_lyric(f"{rec['name']} — {rec['artist']}")
         notify(self.root, f"🎤 已加载歌词《{rec['name']}》")
 
     def _show_lyric_win(self, title):
-        """歌词页：单独页面展示全部歌词，当前句高亮+自动滚动，含播放控件"""
+        """歌词页：KTV 浮动流动效果——当前句居中大字，上下句渐变缩小流动"""
         if not self._lyric_on.get():
             return
         self._close_lyric_win_only()
         win = tk.Toplevel(self.root)
         win.title("🎤 歌词")
         win.configure(bg=C["card"])
-        win.geometry("660x620")
+        win.geometry("660x600")
         win.transient(self.root)
 
         tk.Label(win, text=title, font=("Microsoft YaHei", 13, "bold"),
                  bg=C["card"], fg=C["fg"]).pack(pady=(14, 2))
-        tk.Label(win, text="按下↕ 滚动歌词，当前句高亮跟随播放", font=("Microsoft YaHei", 8),
-                 bg=C["card"], fg=C["muted"]).pack()
 
-        # 歌词全部行（可滚动，当前句高亮）
-        lb = tk.Listbox(win, bg=C["card"], fg=C["muted"],
-                        font=("Microsoft YaHei", 11), activestyle="none",
-                        selectbackground=C["accent"], selectforeground="#fff",
-                        relief="flat", highlightthickness=0, bd=0, justify="center")
-        for _s, txt in self._lyric_lines:
-            lb.insert("end", txt)
-        if self._lyric_lines:
-            lb.selection_set(0)
-        lb.pack(fill="both", expand=True, padx=24, pady=8)
-        self._lyric_list = lb
+        # KTV 歌词区：Canvas 绘制，当前句居中流动
+        canvas = tk.Canvas(win, bg=C["card"], highlightthickness=0)
+        canvas.pack(fill="both", expand=True, padx=24, pady=8)
+        self._lyric_canvas = canvas
         self._last_lyric_idx = None
 
-        # 控制条：播放暂停 / 上下首 / 微调 / 关闭
+        # 控制条：播放暂停 / 微调 / 关闭
         bar = tk.Frame(win, bg=C["card"])
         bar.pack(pady=(0, 14))
         self._lyric_play_btn = tk.Button(
@@ -976,10 +975,6 @@ class MusicApp:
             relief="flat", activebackground=C["accent"], activeforeground="#fff",
             command=self._play_toggle)
         self._lyric_play_btn.pack(side="left", padx=5)
-        for text, cmd in (("⏮", lambda: self._step(-1)), ("⏭", lambda: self._step(1))):
-            tk.Button(bar, text=text, font=("Microsoft YaHei", 11), bg=C["active"], fg=C["fg"],
-                      relief="flat", activebackground=C["accent"], activeforeground="#fff",
-                      command=cmd).pack(side="left", padx=5)
         for text, cmd in (("−0.5s", lambda: self._nudge_lyric(-0.5)),
                           ("+0.5s", lambda: self._nudge_lyric(0.5))):
             tk.Button(bar, text=text, font=("Microsoft YaHei", 10), bg=C["active"], fg=C["fg"],
@@ -1019,8 +1014,9 @@ class MusicApp:
         self._close_lyric_win_only()
 
     def _update_lyric(self, pos):
-        """按播放位置高亮当前句并自动滚动到可见"""
-        if not self._lyric_lines or not getattr(self, "_lyric_list", None):
+        """歌词页 Canvas：当前句居中大字，上下句渐变缩小，形成浮动流动"""
+        canvas = getattr(self, "_lyric_canvas", None)
+        if not self._lyric_lines or not canvas:
             return
         t = pos + self._lyric_offset
         idx = -1
@@ -1031,11 +1027,24 @@ class MusicApp:
                 break
         if idx != self._last_lyric_idx:
             self._last_lyric_idx = idx
-            lb = self._lyric_list
-            lb.selection_clear(0, "end")
-            if idx >= 0:
-                lb.selection_set(idx)
-                lb.see(idx)   # 自动滚动到当前句
+            canvas.delete("lyr")
+            cx = canvas.winfo_width() / 2
+            cy = canvas.winfo_height() / 2
+            rows = [(-2, 11, "#5a5a6a"), (-1, 13, "#8a8a9a"),
+                    (0, 25, "#ffffff"),
+                    (1, 13, "#8a8a9a"), (2, 11, "#5a5a6a")]
+            for off, size, color in rows:
+                k = idx + off
+                if 0 <= k < len(self._lyric_lines):
+                    txt = self._lyric_lines[k][1]
+                    font = ("Microsoft YaHei", size, "bold") if off == 0 else ("Microsoft YaHei", size)
+                    # 当前句黑阴影描边
+                    if off == 0:
+                        canvas.create_text(cx + 2, cy + off * 36 + 2, text=txt,
+                                           font=("Microsoft YaHei", size, "bold"),
+                                           fill="#1a1a2a", tags="lyr")
+                    canvas.create_text(cx, cy + off * 36, text=txt, font=font,
+                                       fill=color, tags="lyr")
         # 同步桌面挂件位置
         self._lyr_send(f"pos|{pos}|{getattr(self.player, 'duration', 0)}|"
                        + ("pause" if getattr(self.player, "paused", False) else "play"))
