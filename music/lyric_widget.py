@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QToolButton,
                              QHBoxLayout, QPushButton)
 
 PORT = 39462
-W, H = 960, 260
+W, H = 960, 116
 
 
 class NetThread(QThread):
@@ -148,26 +148,22 @@ class LyricWindow(QWidget):
     def paintEvent(self, _e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        cx, cy = W // 2, 104
         idx = self._current_index()
-        # 桌面歌词：当前句 + 附近一句两句
-        rows = [(-1, 0.55), (0, 1.0), (1, 0.55)]
-        for off, alpha in rows:
-            k = idx + off
-            if 0 <= k < len(self.lines):
-                txt = self.lines[k][1]
-                if off == 0:
-                    # 当前行：黑色阴影 + 白色大字
-                    p.setFont(QFont("Microsoft YaHei", 27, QFont.Bold))
-                    p.setPen(QColor(0, 0, 0, 200))
-                    p.drawText(cx + 2, cy + off * 36 + 2 + 2, W, 44, Qt.AlignHCenter, txt)
-                    p.setPen(QColor(255, 255, 255))
-                    p.drawText(cx, cy + off * 36 + 2, W, 44, Qt.AlignHCenter, txt)
-                else:
-                    p.setFont(QFont("Microsoft YaHei", 13))
-                    a = int(255 * alpha)
-                    p.setPen(QColor(255, 255, 255, a))
-                    p.drawText(cx, cy + off * 34 + 2, W, 30, Qt.AlignHCenter, txt)
+        if 0 <= idx < len(self.lines):
+            txt = self.lines[idx][1]
+            # 单句：手动精确居中（QFontMetrics 算文本宽，避免 drawText rect 偏移）
+            font = QFont("Microsoft YaHei", 30, QFont.Bold)
+            p.setFont(font)
+            from PyQt5.QtGui import QFontMetrics
+            fm = QFontMetrics(font)
+            tw = fm.horizontalAdvance(txt)
+            x = max(0, (W - tw) // 2)
+            y_center = H - 26 - 25           # 控制条(26px)上方居中
+            baseline = y_center + (fm.ascent() - fm.descent()) // 2
+            p.setPen(QColor(0, 0, 0, 200))
+            p.drawText(x + 2, baseline + 2, txt)    # 黑色阴影
+            p.setPen(QColor(255, 255, 255))
+            p.drawText(x, baseline, txt)            # 白色主字
         p.end()
 
     def _current_index(self):
