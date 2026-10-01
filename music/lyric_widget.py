@@ -13,7 +13,7 @@
   qt → music: nudge|±0.5     pause     step|±1
 """
 import sys, json, socket, time, os
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings, QTimer
 from PyQt5.QtGui import QPainter, QColor, QFont
 from PyQt5.QtWidgets import (QApplication, QWidget, QToolButton,
                              QHBoxLayout, QPushButton)
@@ -101,6 +101,14 @@ class LyricWindow(QWidget):
         self._handle = None
         self.lines = []          # [(秒, 文本)]
         self.pos = 0.0
+        self.duration = 0.0
+        self._state = "stop"   # play/pause/stop
+        self._t_last = time.monotonic()
+        self._cur_idx = None   # 当前渲染的句索引（事件驱动重绘）
+        # 本地平滑推进：网络 pos 只做校准，Tk 主循环忙也不丢句
+        self._adv = QTimer(self)
+        self._adv.timeout.connect(self._advance)
+        self._adv.start(100)
         self.offset = 0.0
         self.paused = False
         self.title = ""
@@ -148,7 +156,7 @@ class LyricWindow(QWidget):
     def paintEvent(self, _e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        idx = self._current_index()
+        idx = self._cur_idx if self._cur_idx is not None else self._display_idx()
         if 0 <= idx < len(self.lines):
             txt = self.lines[idx][1]
             # 单句：手动精确居中（QFontMetrics 算文本宽，避免 drawText rect 偏移）
@@ -184,13 +192,17 @@ class LyricWindow(QWidget):
             _, body, off = line.split("|", 2)
             self.lines = json.loads(body)
             self.offset = float(off)
-            self.update()
+            self._cur_idx = None
+            self._sync_render()
         elif kind == "pos":
-            _, p, _d, st = line.split("|")
-            self.pos = float(p)
+            _, p, d, st = line.split("|")
+            self.pos = float(p)          # 精确校准（seek/暂停后不会漂移）
+            self.duration = float(d)
+            self._state = st
+            self._t_last = time.monotonic()
             self.paused = (st == "pause")
             self.t_pause.setText("▶" if self.paused else "⏸")
-            self.update()
+            self._sync_render()
         elif kind == "title":
             self.title = parts[1]
             self.t_title.setText(parts[1])
@@ -203,6 +215,33 @@ class LyricWindow(QWidget):
             self.net.sock.sendall((msg + "\n").encode())
         except Exception:
             pass
+
+    def _display_idx(self):
+        t = self.pos + self.offset
+        idx = -1
+        for k, (s, _) in enumerate(self.lines):
+            if s <= t:
+                idx = k
+            else:
+                break
+        return idx
+
+    def _sync_render(self):
+        """只在当前句变化时才重绘（事件驱动：每句画一次，不每100ms全量重绘）"""
+        idx = self._display_idx()
+        if idx != self._cur_idx:
+            self._cur_idx = idx
+            self.update()
+
+    def _advance(self):
+        """本地按真实时间推进播放位置（播放中），显示不依赖推送频率"""
+        if self._state == "play" and self.lines:
+            now = time.monotonic()
+            self.pos += now - self._t_last
+            self._t_last = now
+            self._sync_render()
+        elif self._state != "play":
+            self._t_last = time.monotonic()
 
     def on_pause(self):
         self.cmd("pause")
