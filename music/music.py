@@ -435,14 +435,18 @@ class Player:
         return self.mpv is not None and self.mpv.poll() is None
 
     def tick(self):
-        """定时上报播放位置"""
+        """定时上报播放位置；暂停时也上报(固定 pos + pause 状态)，字幕才能同步暂停"""
         if self.mpv is None or self.mpv.poll() is not None:
             if self.url and self._end_cb:
                 self._end_cb()
             return
         if self.paused:
+            if self._tick_cb:
+                # 暂停：pos 固定在最后已知位置，状态带 pause（挂件据此停止推进）
+                self._tick_cb(getattr(self, "_last_pos", self.offset), self.duration)
             return
         pos = self.offset + (time.time() - self.started_at)
+        self._last_pos = pos
         if self._tick_cb:
             self._tick_cb(pos, self.duration)
 
