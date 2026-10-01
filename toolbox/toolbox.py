@@ -936,6 +936,10 @@ class ToolboxApp:
                 if item['path'] not in order:
                     new_items.append(item)
             self.items = new_items
+            # ★ 同步回全量：后续 _apply_filter 从 _all_items 过滤时
+            #   顺序也按 order（否则过滤后被打回文件名序，顺序还原）
+            if hasattr(self, '_all_items'):
+                self._all_items = list(new_items)
         except Exception:
             pass
 
