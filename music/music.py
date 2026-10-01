@@ -820,32 +820,64 @@ class MusicApp:
         notify(self.root, f"🎤 已加载歌词《{rec['name']}》")
 
     def _show_lyric_win(self, title):
-        """歌词窗：当前句大字 + 微调偏移按钮"""
+        """桌面悬浮歌词：无边框·半透明·置顶·可拖，位置记忆在 lyrics.json"""
         if self._lyric_win:
             try:
                 self._lyric_win.destroy()
             except Exception:
                 pass
         win = tk.Toplevel(self.root)
-        win.title("🎤 歌词")
-        win.configure(bg="#0f0f23")
+        win.overrideredirect(True)          # 无边框悬浮
         win.attributes("-topmost", True)
-        win.geometry("520x220")
-        tk.Label(win, text=title, font=("Microsoft YaHei", 10, "bold"),
-                 bg="#0f0f23", fg=C["muted"]).pack(pady=(10, 0))
+        win.attributes("-alpha", 0.90)     # 半透明
+        win.configure(bg="#0f0f23")
+        # 位置：记住上次的，否则屏幕底部中间
+        pos = self._lyric_map.get("_pos") or {}
+        if not pos:
+            pos = {"x": max(0, (win.winfo_screenwidth() - 560) // 2),
+                   "y": win.winfo_screenheight() - 300}
+        win.geometry(f"560x150+{pos['x']}+{pos['y']}")
+        win.update_idletasks()
+        win.attributes("-alpha", 0.90)     # 半透明（等窗口就绪后再设）
+        top = tk.Frame(win, bg="#0f0f23")
+        top.pack(fill="x", padx=8, pady=(4, 0))
+        tk.Button(top, text="−0.5s", font=("Microsoft YaHei", 7), bg="#1a1a3a",
+                  fg=C["muted"], relief="flat", activebackground="#2a2a4a",
+                  command=lambda: self._nudge_lyric(-0.5)).pack(side="left", padx=(0, 3))
+        tk.Button(top, text="+0.5s", font=("Microsoft YaHei", 7), bg="#1a1a3a",
+                  fg=C["muted"], relief="flat", activebackground="#2a2a4a",
+                  command=lambda: self._nudge_lyric(0.5)).pack(side="left")
+        tk.Label(top, text=title, font=("Microsoft YaHei", 8), bg="#0f0f23",
+                 fg=C["muted"]).pack(side="left", padx=10)
+        tk.Button(top, text="×", font=("Microsoft YaHei", 9, "bold"), bg="#1a1a3a",
+                  fg=C["muted"], relief="flat", activebackground="#8a1f1f",
+                  activeforeground="#fff", command=self._close_lyric).pack(side="right")
+
+        # 歌词大字（可按住拖动）
         self._lyric_label = tk.Label(
-            win, text="…", font=("Microsoft YaHei", 20, "bold"),
-            bg="#0f0f23", fg=C["fg"], wraplength=480, justify="center")
-        self._lyric_label.pack(fill="both", expand=True, pady=10)
-        bar = tk.Frame(win, bg="#0f0f23")
-        bar.pack(pady=(0, 10))
-        tk.Button(bar, text="−0.5s", font=("Microsoft YaHei", 9), bg="#1a1a3a", fg=C["fg"],
-                  relief="flat", command=lambda: self._nudge_lyric(-0.5)).pack(side="left", padx=4)
-        tk.Button(bar, text="+0.5s", font=("Microsoft YaHei", 9), bg="#1a1a3a", fg=C["fg"],
-                  relief="flat", command=lambda: self._nudge_lyric(0.5)).pack(side="left", padx=4)
-        tk.Button(bar, text="关闭", font=("Microsoft YaHei", 9), bg="#1a1a3a", fg=C["fg"],
-                  relief="flat", command=self._close_lyric).pack(side="left", padx=4)
+            win, text="…", font=("Microsoft YaHei", 22, "bold"),
+            bg="#0f0f23", fg=C["fg"], wraplength=540, justify="center")
+        self._lyric_label.pack(fill="both", expand=True, pady=(2, 8))
+        self._lyric_label.bind("<Button-1>", self._lyric_drag_start)
+        self._lyric_label.bind("<B1-Motion>", self._lyric_drag_move)
+        self._lyric_label.bind("<ButtonRelease-1>", self._lyric_drag_end)
         self._lyric_win = win
+
+    def _lyric_drag_start(self, e):
+        self._lyric_drag_off = (e.x_root - self._lyric_win.winfo_x(),
+                                e.y_root - self._lyric_win.winfo_y())
+
+    def _lyric_drag_move(self, e):
+        x, y = e.x_root - self._lyric_drag_off[0], e.y_root - self._lyric_drag_off[1]
+        self._lyric_win.geometry(f"+{x}+{y}")
+
+    def _lyric_drag_end(self, e):
+        """拖完记住位置"""
+        self._lyric_map["_pos"] = {
+            "x": e.x_root - self._lyric_drag_off[0],
+            "y": e.y_root - self._lyric_drag_off[1],
+        }
+        _save_lyric_map(self._lyric_map)
 
     def _nudge_lyric(self, delta):
         """手动微调歌词偏移（并持久化到这首歌的记录）"""
