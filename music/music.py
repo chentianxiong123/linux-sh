@@ -436,9 +436,20 @@ class Player:
 
     def tick(self):
         """定时上报播放位置；暂停时也上报(固定 pos + pause 状态)，字幕才能同步暂停"""
-        if self.mpv is None or self.mpv.poll() is not None:
-            if self.url and self._end_cb:
-                self._end_cb()
+        if self.mpv is None:
+            return
+        if self.mpv.poll() is not None:
+            code = self.mpv.poll()
+            elapsed = time.time() - self.started_at
+            # 退出码 0 = 正常播完 → 切下一首
+            # 非0 且刚启动(<8s) = 启动/首次加载失败(URL冷启动慢/mpv加载不了直接退)
+            #   → 不该跳歌，报错并自动重试当前歌
+            if code == 0 or elapsed > 8.0:
+                if self.url and self._end_cb:
+                    self._end_cb()
+            else:
+                if self._fail_cb:
+                    self._fail_cb(code)
             return
         if self.paused:
             if self._tick_cb:
@@ -834,6 +845,7 @@ class MusicApp:
                 qn_label = {AUDIO_192K: "192k", AUDIO_128K: "128k",
                             AUDIO_64K: "64k", AUDIO_FLAC: "FLAC"}.get(actual_qn, f"{actual_qn}")
                 self.player.load(url, _parse_dur(item["duration"]))
+                self.player._fail_cb = self._on_player_fail   # 启动/加载失败回调
                 self.player.start()
                 self.info.configure(text=f"🎵 {item['title']} — {item['author']} [{qn_label}]")
                 self.btn["play"].configure(text="⏸ 暂停")
@@ -1208,6 +1220,21 @@ class MusicApp:
         if self._seek_drag_ratio is None:
             self._draw_seek(min(1.0, pos / dur))
         self._update_lyric(pos)
+
+    def _on_player_fail(self, code):
+        """mpv 启动/首次加载失败(非正常结束)：不跳歌，自动重试一次当前歌"""
+        if getattr(self, "_fail_retrying", False):
+            self._fail_retrying = False
+            self.info.configure(text=f"❌ 播放失败 (mpv 退出码 {code})")
+            self.btn["play"].configure(text="▶ 播放")
+            return
+        self._fail_retrying = True
+        self.info.configure(text="⚠️ 加载失败，自动重试...")
+        self.root.after(1500, self._retry_play)
+
+    def _retry_play(self):
+        self._fail_retrying = False
+        self._play()
 
     def _on_end(self):
         """一曲结束：按播放模式切换下一曲"""
