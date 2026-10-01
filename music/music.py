@@ -985,9 +985,7 @@ class MusicApp:
         notify(self.root, f"🎤 桌面歌词《{song_name}》")
 
     def _show_lyric_win(self, title):
-        """歌词页：KTV 浮动流动效果——当前句居中大字，上下句渐变缩小流动"""
-        if not self._lyric_on.get():
-            return
+        """歌词面板（手动打开不受自动开关限制，开关只管播放时自动出挂件）"""
         self._close_lyric_win_only()
         win = tk.Toplevel(self.root)
         win.title("🎤 歌词")
