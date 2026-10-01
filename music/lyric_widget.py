@@ -181,8 +181,9 @@ class LyricWindow(QWidget):
         self.t_pause = mk("⏸", self.on_pause, 24)
         self.t_minus = mk("−0.5", lambda: self.on_nudge(-0.5), 38)
         self.t_plus = mk("+0.5", lambda: self.on_nudge(0.5), 38)
+        self.t_lock = mk("🔓", self.toggle_lock, 26)
         self.t_close = mk("×", self.cmd_close, 22)
-        for b in (self.t_pause, self.t_minus, self.t_plus, self.t_close):
+        for b in (self.t_pause, self.t_minus, self.t_plus, self.t_lock, self.t_close):
             bar.addWidget(b)
         bar.addStretch(1)
         ctrl = QWidget(self)
@@ -190,6 +191,17 @@ class LyricWindow(QWidget):
         ctrl.setGeometry(0, H - 24, W, 24)
         self._ctrl = ctrl
         self._ctrl.hide()
+        # 锁定态的小锁（很小，悬停才出，点击解锁）
+        self._lock_btn = QPushButton("🔒", self)
+        self._lock_btn.setStyleSheet(
+            "QPushButton{color:#c8c8d8;background:rgba(20,20,30,130);border:none;"
+            "font-size:9px;border-radius:3px;}"
+            "QPushButton:hover{color:#ffffff;background:rgba(255,255,255,70);}")
+        self._lock_btn.setFixedSize(16, 16)
+        self._lock_btn.setGeometry(6, H - 22, 16, 16)
+        self._lock_btn.clicked.connect(self.toggle_lock)
+        self._lock_btn.hide()
+        self._locked = False
         # 淡入动画
         self._ctrl_eff = QGraphicsOpacityEffect(self._ctrl)
         self._ctrl.setGraphicsEffect(self._ctrl_eff)
@@ -209,10 +221,15 @@ class LyricWindow(QWidget):
         self._hover.timeout.connect(self._hover_check)
         self._hover.start(150)
 
-    # ── 悬停交互：平时全穿透，悬停浮现控制条可点 ──
+    # ── 悬停交互：平时全穿透，悬停浮现控制条/小锁，可点 ──
     def _show_ui(self):
         self._ui_shown = True
-        self._ctrl.show()
+        if self._locked:
+            self._ctrl.hide()
+            self._lock_btn.show()          # 锁定态：只出小锁
+        else:
+            self._ctrl.show()              # 解锁态：整条控制条
+            self._lock_btn.hide()
         self._ctrl_anim.stop()
         self._ctrl_eff.setOpacity(0.0)
         self._ctrl_anim.setStartValue(0.0)
@@ -226,13 +243,16 @@ class LyricWindow(QWidget):
     def _hide_ui(self):
         self._ui_shown = False
         self._ctrl.hide()
+        self._lock_btn.hide()
         self._ctrl_anim.stop()
         # 恢复：X11 输入区域清空 → 全穿透（透明区域也不挡）
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         input_pass(self)
 
-    # ── 整窗任意位置拖拽（悬停浮现控制条期间）──
+    # ── 整窗任意位置拖拽（悬停浮现控制条期间；锁定态不可拖）──
     def mousePressEvent(self, e):
+        if self._locked:
+            return
         if e.button() == Qt.LeftButton:
             self._drag = (e.globalPos().x() - self.x(), e.globalPos().y() - self.y())
 
@@ -337,10 +357,29 @@ class LyricWindow(QWidget):
 
     # ── 发命令给 music.py ──
     def cmd(self, msg):
-        try:
-            self.net.sock.sendall((msg + "\n").encode())
-        except Exception:
-            pass
+        for attempt in range(2):
+            try:
+                s = getattr(self.net, "sock", None)
+                if s is None:
+                    s = socket.create_connection(("127.0.0.1", PORT), timeout=2)
+                    self.net.sock = s
+                s.sendall((msg + "\n").encode())
+                return
+            except Exception:
+                self.net.sock = None          # 连接失效：清掉，重连再试一次
+                if attempt == 0:
+                    time.sleep(0.15)
+
+    def toggle_lock(self):
+        """🔓/🔒 锁定切换：锁定后悬浮只出小锁、不可拖；解锁恢复控制条+可拖"""
+        self._locked = not self._locked
+        self.t_lock.setText("🔒" if self._locked else "🔓")
+        if self._locked:
+            self._ctrl.hide()
+            self._lock_btn.show()      # 只留小锁
+        else:
+            self._ctrl.show()
+            self._lock_btn.hide()
 
     def _display_idx(self):
         t = self.pos + self.offset

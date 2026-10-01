@@ -559,6 +559,8 @@ class MusicApp:
             while True:
                 try:
                     line = f.readline()
+                except socket.timeout:
+                    continue   # ★ 超时 ≠ 断开：连接保持，否则每0.5s被掐导致挂件命令发不出去
                 except Exception:
                     break
                 if not line:
