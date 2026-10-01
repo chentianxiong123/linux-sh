@@ -487,6 +487,8 @@ class MusicApp:
         self._pick_win = None    # 歌词候选窗
         self._lyric_map = _load_lyric_map()  # bvid → 已选歌词版本
         self._cur_bvid = None    # 当前播放/选词歌曲 bvid
+        self._lyric_on = tk.BooleanVar(value=self._lyric_map.get("_on", True))  # 桌面歌词总开关（持久化）
+        self._lyric_play_btn = None  # 悬浮窗上的播放/暂停按钮
         self.volume = int(_load_pref().get("volume", DEFAULT_VOLUME))
         self.vol_pct = None   # 在 _build 里创建，滑杆回调可能先触发
         self.player = Player(on_tick=self._on_tick, on_end=self._on_end)
@@ -781,11 +783,13 @@ class MusicApp:
         lb.bind("<Double-Button-1>", lambda e: pick())
         row = tk.Frame(win, bg=C["card"])
         row.pack(fill="x", padx=12, pady=(0, 8))
-        self._lyric_on = tk.BooleanVar(value=True)
+        def keep_on():
+            self._lyric_map["_on"] = self._lyric_on.get()   # 开关持久化
+            _save_lyric_map(self._lyric_map)
         tk.Checkbutton(row, text="选定后显示桌面歌词", variable=self._lyric_on,
                        bg=C["card"], fg=C["fg"], selectcolor=C["card"],
                        activebackground=C["card"], activeforeground=C["fg"],
-                       font=("Microsoft YaHei", 9), command=None).pack(side="left")
+                       font=("Microsoft YaHei", 9), command=keep_on).pack(side="left")
         tk.Button(win, text="选定歌词", font=("Microsoft YaHei", 9),
                   bg=C["accent"], fg="#fff", relief="flat", command=pick).pack()
         self._pick_win = win
@@ -806,7 +810,9 @@ class MusicApp:
             notify(self.root, f"💾 已记住《{cand['name']}》歌词，下次播放自动加载")
 
     def _autoload_lyric(self, item):
-        """播放时：这首若已选过歌词版本，自动拉 LRC 并开歌词窗（不弹候选）"""
+        """播放时：开关打开且这首已选过歌词版本，自动拉 LRC 并开悬浮窗"""
+        if not self._lyric_on.get():
+            return  # 总开关关着：不显示字幕
         rec = self._lyric_map.get(item.get("bvid", ""))
         if not rec:
             return
@@ -845,15 +851,15 @@ class MusicApp:
                    "y": win.winfo_screenheight() - 320}
         win.geometry(f"600x150+{pos['x']}+{pos['y']}")
         win.update_idletasks()
-        win.attributes("-alpha", 0.42)     # 毛玻璃：背景透出桌面，先就绪再设
+        win.attributes("-alpha", 0.25)     # 背景透出桌面（整窗统调，白亮字弥补可读性）
 
         # 歌词大字：黑色阴影(下偏移2px) + 白色主字，叠放成描边效果
-        sh = tk.Label(win, text="…", font=("Microsoft YaHei", 24, "bold"),
+        sh = tk.Label(win, text="…", font=("Microsoft YaHei", 26, "bold"),
                       bg="#0f0f23", fg="#000000")
-        sh.place(relx=0.5, rely=0.55, x=2, y=2, anchor="center")
-        main = tk.Label(win, text="…", font=("Microsoft YaHei", 22, "bold"),
+        sh.place(relx=0.5, rely=0.5, x=2, y=2, anchor="center")
+        main = tk.Label(win, text="…", font=("Microsoft YaHei", 24, "bold"),
                         bg="#0f0f23", fg="#ffffff", wraplength=560, justify="center")
-        main.place(relx=0.5, rely=0.55, anchor="center")
+        main.place(relx=0.5, rely=0.5, anchor="center")
         self._lyric_shadow = sh
         self._lyric_label = main
         # 拖动（按住歌词任意一处）
@@ -862,11 +868,20 @@ class MusicApp:
             w.bind("<B1-Motion>", self._lyric_drag_move)
             w.bind("<ButtonRelease-1>", self._lyric_drag_end)
 
-        # 底部微型控制条（半透明一体，hover 才亮）
+        # 底部控制条：播放控件 + 歌词微调 + 关闭（hover 才亮）
         bar = tk.Frame(win, bg="#0f0f23")
         bar.place(relx=0.5, rely=0.92, anchor="s")
         tk.Label(bar, text=title, font=("Microsoft YaHei", 8), bg="#0f0f23",
                  fg="#9aa0b0").pack(side="left", padx=8)
+        self._lyric_play_btn = tk.Button(
+            bar, text="⏸", font=("Microsoft YaHei", 9), bg="#0f0f23", fg="#9aa0b0",
+            relief="flat", activebackground="#2a2a4a", activeforeground="#fff",
+            command=self._play_toggle)
+        self._lyric_play_btn.pack(side="left", padx=2)
+        for text, cmd in (("⏮", lambda: self._step(-1)), ("⏭", lambda: self._step(1))):
+            tk.Button(bar, text=text, font=("Microsoft YaHei", 9), bg="#0f0f23", fg="#9aa0b0",
+                      relief="flat", activebackground="#2a2a4a", activeforeground="#fff",
+                      command=cmd).pack(side="left", padx=2)
         for text, cmd in (("−0.5s", lambda: self._nudge_lyric(-0.5)),
                           ("+0.5s", lambda: self._nudge_lyric(0.5))):
             tk.Button(bar, text=text, font=("Microsoft YaHei", 8, "bold"),
@@ -933,15 +948,27 @@ class MusicApp:
                 shadow.configure(text=line or "…")
 
     def _play_toggle(self):
-        """播放/暂停切换（一个按钮）"""
+        """播放/暂停切换（主界面按钮 + 悬浮窗按钮同步）"""
         if self.player.is_playing():
             self.player.toggle()
             if self.player.paused:
                 self.btn["play"].configure(text="▶ 继续")
+                if self._lyric_play_btn:
+                    self._lyric_play_btn.configure(text="▶")
             else:
                 self.btn["play"].configure(text="⏸ 暂停")
+                if self._lyric_play_btn:
+                    self._lyric_play_btn.configure(text="⏸")
         else:
             self._play()
+
+    def _step(self, delta):
+        """上下首（悬浮窗 ⏮/⏭）"""
+        if self.current is None or not self._source:
+            return
+        n = len(self._source)
+        self.current = (self.current + delta) % n
+        self._play_item(self._source[self.current])
 
     def _cycle_mode(self):
         """播放模式循环：顺序 → 随机 → 单曲"""
