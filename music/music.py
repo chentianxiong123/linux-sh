@@ -482,13 +482,18 @@ class MusicApp:
         self._lyric_lines = []   # 当前歌词 [(秒, 行)]
         self._lyric_offset = 0.0 # 歌词手动微调偏移（秒）
         self._last_lyric = None  # 上次显示的歌词行（去重刷新）
-        self._lyric_win = None   # 歌词窗
-        self._lyric_label = None # 歌词窗当前句 Label
+        self._lyric_win = None   # (废弃)原 Tk 歌词窗引用
+        self._lyric_label = None # (废弃)
         self._pick_win = None    # 歌词候选窗
         self._lyric_map = _load_lyric_map()  # bvid → 已选歌词版本
         self._cur_bvid = None    # 当前播放/选词歌曲 bvid
         self._lyric_on = tk.BooleanVar(value=self._lyric_map.get("_on", True))  # 桌面歌词总开关（持久化）
-        self._lyric_play_btn = None  # 悬浮窗上的播放/暂停按钮
+        self._lyric_play_btn = None  # (废弃)原悬浮窗按钮引用
+        # Qt 桌面歌词进程通信
+        self._lyr_sock = None   # Qt 进程连接（accept 后的 socket）
+        self._lyr_srv = None    # 监听 socket
+        self._lyr_proc = None   # Qt 进程
+        self._start_lyric_server()
         self.volume = int(_load_pref().get("volume", DEFAULT_VOLUME))
         self.vol_pct = None   # 在 _build 里创建，滑杆回调可能先触发
         self.player = Player(on_tick=self._on_tick, on_end=self._on_end)
@@ -496,12 +501,89 @@ class MusicApp:
         self._build()
         self._poll_tick()
 
-    def _on_close(self):
-        """窗口关闭时清理所有进程"""
-        self.player.stop()
-        if self._lyric_win:
+    def _start_lyric_server(self):
+        """本地监听，等 Qt 歌词窗连入；连上后读它的命令"""
+        try:
+            self._lyr_srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._lyr_srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._lyr_srv.bind(("127.0.0.1", 39462))
+            self._lyr_srv.listen(1)
+            self._lyr_srv.settimeout(1)
+        except Exception:
+            self._lyr_srv = None
+        threading.Thread(target=self._lyr_accept, daemon=True).start()
+
+    def _lyr_accept(self):
+        while self._lyr_srv:
             try:
-                self._lyric_win.destroy()
+                conn, _ = self._lyr_srv.accept()
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+            self._lyr_sock = conn
+            self._lyr_sock.settimeout(0.5)
+            f = conn.makefile("r", encoding="utf-8")
+            while True:
+                try:
+                    line = f.readline()
+                except Exception:
+                    break
+                if not line:
+                    break
+                line = line.strip()
+                if line and self.root:
+                    try:
+                        self.root.after(0, self._lyr_cmd, line)
+                    except Exception:
+                        pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._lyr_sock = None
+
+    def _lyr_send(self, msg):
+        """推送消息给 Qt 歌词窗"""
+        if self._lyr_sock:
+            try:
+                self._lyr_sock.sendall((msg + "\n").encode())
+            except Exception:
+                pass
+
+    def _lyr_cmd(self, line):
+        """Qt 歌词窗发来的命令"""
+        parts = line.split("|")
+        if parts[0] == "nudge" and len(parts) > 1:
+            try:
+                self._nudge_lyric(float(parts[1]))
+            except Exception:
+                pass
+        elif parts[0] == "pause" and self.player:
+            self._play_toggle()
+        elif parts[0] == "step" and len(parts) > 1:
+            try:
+                self._step(int(parts[1]))
+            except Exception:
+                pass
+        elif parts[0] == "close-ctrl":
+            self._close_lyric()
+
+    def _on_close(self):
+        """窗口关闭：停播放器、关 Qt 歌词窗、清理"""
+        try:
+            self.player.stop()
+        except Exception:
+            pass
+        if self._lyr_sock:
+            try:
+                self._lyr_send("close")
+                self._lyr_sock.close()
+            except Exception:
+                pass
+        if self._lyr_proc:
+            try:
+                self._lyr_proc.terminate()
             except Exception:
                 pass
         if self._pick_win:
@@ -509,7 +591,38 @@ class MusicApp:
                 self._pick_win.destroy()
             except Exception:
                 pass
+        if self._lyric_win:
+            try:
+                self._lyric_win.destroy()
+            except Exception:
+                pass
         self.root.destroy()
+
+    def _ensure_lyric_qt(self):
+        """确保 Qt 歌词窗进程在跑"""
+        if self._lyr_proc and self._lyr_proc.poll() is None:
+            return
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lyric_widget.py")
+        try:
+            self._lyr_proc = subprocess.Popen(
+                [sys.executable, script],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            self._lyr_proc = None
+
+    def _push_lyric(self, title):
+        """把当前歌词数据推给 Qt 窗（spawn 进程 + 等连接后推送）"""
+        self._ensure_lyric_qt()
+
+        def send():
+            for _ in range(4):
+                if self._lyr_sock:
+                    break
+                time.sleep(0.5)
+            self._lyr_send(f"title|{title}")
+            self._lyr_send(f"lyric|{json.dumps(self._lyric_lines, ensure_ascii=True)}|{self._lyric_offset}")
+        threading.Thread(target=send, daemon=True).start()
 
     def _build(self):
         pad = {"padx": 12, "pady": 6}
@@ -834,131 +947,39 @@ class MusicApp:
         notify(self.root, f"🎤 已加载歌词《{rec['name']}》")
 
     def _show_lyric_win(self, title):
-        """桌面悬浮歌词：深底低透明度毛玻璃 + 白字黑影，可拖，位置记忆"""
-        if self._lyric_win:
-            try:
-                self._lyric_win.destroy()
-            except Exception:
-                pass
-        win = tk.Toplevel(self.root)
-        win.overrideredirect(True)          # 无边框悬浮
-        win.attributes("-topmost", True)
-        win.configure(bg="#0f0f23")
-        # 位置：记住上次的，否则屏幕底部中间
-        pos = self._lyric_map.get("_pos") or {}
-        if not pos:
-            pos = {"x": max(0, (win.winfo_screenwidth() - 600) // 2),
-                   "y": win.winfo_screenheight() - 320}
-        win.geometry(f"600x150+{pos['x']}+{pos['y']}")
-        win.update_idletasks()
-        win.attributes("-alpha", 0.25)     # 背景透出桌面（整窗统调，白亮字弥补可读性）
-
-        # 歌词大字：黑色阴影(下偏移2px) + 白色主字，叠放成描边效果
-        sh = tk.Label(win, text="…", font=("Microsoft YaHei", 26, "bold"),
-                      bg="#0f0f23", fg="#000000")
-        sh.place(relx=0.5, rely=0.5, x=2, y=2, anchor="center")
-        main = tk.Label(win, text="…", font=("Microsoft YaHei", 24, "bold"),
-                        bg="#0f0f23", fg="#ffffff", wraplength=560, justify="center")
-        main.place(relx=0.5, rely=0.5, anchor="center")
-        self._lyric_shadow = sh
-        self._lyric_label = main
-        # 拖动（按住歌词任意一处）
-        for w in (sh, main):
-            w.bind("<Button-1>", self._lyric_drag_start)
-            w.bind("<B1-Motion>", self._lyric_drag_move)
-            w.bind("<ButtonRelease-1>", self._lyric_drag_end)
-
-        # 底部控制条：播放控件 + 歌词微调 + 关闭（hover 才亮）
-        bar = tk.Frame(win, bg="#0f0f23")
-        bar.place(relx=0.5, rely=0.92, anchor="s")
-        tk.Label(bar, text=title, font=("Microsoft YaHei", 8), bg="#0f0f23",
-                 fg="#9aa0b0").pack(side="left", padx=8)
-        self._lyric_play_btn = tk.Button(
-            bar, text="⏸", font=("Microsoft YaHei", 9), bg="#0f0f23", fg="#9aa0b0",
-            relief="flat", activebackground="#2a2a4a", activeforeground="#fff",
-            command=self._play_toggle)
-        self._lyric_play_btn.pack(side="left", padx=2)
-        for text, cmd in (("⏮", lambda: self._step(-1)), ("⏭", lambda: self._step(1))):
-            tk.Button(bar, text=text, font=("Microsoft YaHei", 9), bg="#0f0f23", fg="#9aa0b0",
-                      relief="flat", activebackground="#2a2a4a", activeforeground="#fff",
-                      command=cmd).pack(side="left", padx=2)
-        for text, cmd in (("−0.5s", lambda: self._nudge_lyric(-0.5)),
-                          ("+0.5s", lambda: self._nudge_lyric(0.5))):
-            tk.Button(bar, text=text, font=("Microsoft YaHei", 8, "bold"),
-                      bg="#0f0f23", fg="#9aa0b0", relief="flat",
-                      activebackground="#2a2a4a", activeforeground="#fff",
-                      repeatdelay=300, repeatinterval=120,   # 长按连调，实时生效
-                      command=cmd).pack(side="left", padx=3)
-        tk.Button(bar, text="×", font=("Microsoft YaHei", 9, "bold"),
-                  bg="#0f0f23", fg="#9aa0b0", relief="flat",
-                  activebackground="#8a1f1f", activeforeground="#fff",
-                  command=self._close_lyric).pack(side="left", padx=6)
-        self._lyric_win = win
-
-    def _lyric_drag_start(self, e):
-        self._lyric_drag_off = (e.x_root - self._lyric_win.winfo_x(),
-                                e.y_root - self._lyric_win.winfo_y())
-
-    def _lyric_drag_move(self, e):
-        x, y = e.x_root - self._lyric_drag_off[0], e.y_root - self._lyric_drag_off[1]
-        self._lyric_win.geometry(f"+{x}+{y}")
-
-    def _lyric_drag_end(self, e):
-        """拖完记住位置"""
-        self._lyric_map["_pos"] = {
-            "x": e.x_root - self._lyric_drag_off[0],
-            "y": e.y_root - self._lyric_drag_off[1],
-        }
-        _save_lyric_map(self._lyric_map)
+        """桌面歌词（Qt 进程）：背景真透明，五行动态展开；此处仅推送数据"""
+        if not self._lyric_on.get():
+            return
+        self._push_lyric(title)
 
     def _nudge_lyric(self, delta):
         """手动微调歌词偏移（并持久化到这首歌的记录）"""
         self._lyric_offset += delta
         self._last_lyric = None
-        self._update_lyric(getattr(self, "_last_pos", 0))
+        self._lyr_send(f"lyric|{json.dumps(self._lyric_lines, ensure_ascii=True)}|{self._lyric_offset}")
         if self._cur_bvid and self._cur_bvid in self._lyric_map:
             self._lyric_map[self._cur_bvid]["offset"] = self._lyric_offset
             _save_lyric_map(self._lyric_map)
 
     def _close_lyric(self):
         self._lyric_lines = []
-        if self._lyric_win:
-            try:
-                self._lyric_win.destroy()
-            except Exception:
-                pass
-            self._lyric_win = None
+        self._lyr_send("close")
 
     def _update_lyric(self, pos):
-        """按播放位置显示当前歌词行（主字+阴影同步）"""
-        if not self._lyric_lines or not self._lyric_label:
+        """把播放位置推给 Qt 歌词窗（它自己算当前句并滚动）"""
+        if not self._lyric_lines:
             return
-        t = pos + self._lyric_offset
-        line = ""
-        for ts, txt in self._lyric_lines:
-            if ts <= t:
-                line = txt
-            else:
-                break
-        if line != self._last_lyric:
-            self._last_lyric = line
-            self._lyric_label.configure(text=line or "…")
-            shadow = getattr(self, "_lyric_shadow", None)
-            if shadow:
-                shadow.configure(text=line or "…")
+        st = "pause" if getattr(self.player, "paused", False) else "play"
+        self._lyr_send(f"pos|{pos}|{getattr(self.player, 'duration', 0)}|{st}")
 
     def _play_toggle(self):
-        """播放/暂停切换（主界面按钮 + 悬浮窗按钮同步）"""
+        """播放/暂停切换（主界面按钮 + Qt 歌词窗按钮同步）"""
         if self.player.is_playing():
             self.player.toggle()
             if self.player.paused:
                 self.btn["play"].configure(text="▶ 继续")
-                if self._lyric_play_btn:
-                    self._lyric_play_btn.configure(text="▶")
             else:
                 self.btn["play"].configure(text="⏸ 暂停")
-                if self._lyric_play_btn:
-                    self._lyric_play_btn.configure(text="⏸")
         else:
             self._play()
 
