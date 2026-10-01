@@ -407,6 +407,7 @@ class ToolboxApp:
 
     def _on_close(self):
         """窗口关闭：保存设置 + 销毁"""
+        self._win_geometry = self.root.geometry()   # 关闭瞬间真实几何(含位置)
         self._save_settings()
         self.root.destroy()
 
@@ -571,11 +572,11 @@ class ToolboxApp:
         """窗口尺寸变化 → 重算列数 → 重绘（防抖）"""
         if event.widget is not self.root:
             return
+        # 移动/缩放都更新几何缓存（含位置），退出时保存
+        self._win_geometry = self.root.geometry()
         if self._resize_pending:
             self.root.after_cancel(self._resize_pending)
         self._resize_pending = self.root.after(120, self._apply_layout)
-        # 记住窗口几何（含位置），退出/重启后还原
-        self._win_geometry = self.root.geometry()
 
     def _apply_layout(self):
         """根据当前窗口宽度重算列数并重绘"""
