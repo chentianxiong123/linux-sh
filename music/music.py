@@ -759,7 +759,7 @@ class MusicApp:
         win.title(f"🎤 歌词候选《{song}》")
         win.configure(bg=C["card"])
         win.attributes("-topmost", True)
-        win.geometry("460x340")
+        win.geometry("560x460")
         saved = self._lyric_map.get(bvid or "")
         head = f"《{song}》 选择歌词版本：" + (f"（已存：{saved['name']}）" if saved else "")
         tk.Label(win, text=head, font=("Microsoft YaHei", 10, "bold"),
@@ -776,19 +776,27 @@ class MusicApp:
         def pick():
             sel = lb.curselection()
             if sel:
-                self._apply_lyric(cands[sel[0]], bvid)
+                self._apply_lyric(cands[sel[0]], bvid, show_win=self._lyric_on.get())
                 win.destroy()
         lb.bind("<Double-Button-1>", lambda e: pick())
+        row = tk.Frame(win, bg=C["card"])
+        row.pack(fill="x", padx=12, pady=(0, 8))
+        self._lyric_on = tk.BooleanVar(value=True)
+        tk.Checkbutton(row, text="选定后显示桌面歌词", variable=self._lyric_on,
+                       bg=C["card"], fg=C["fg"], selectcolor=C["card"],
+                       activebackground=C["card"], activeforeground=C["fg"],
+                       font=("Microsoft YaHei", 9), command=None).pack(side="left")
         tk.Button(win, text="选定歌词", font=("Microsoft YaHei", 9),
-                  bg=C["accent"], fg="#fff", relief="flat", command=pick).pack(pady=(0, 10))
+                  bg=C["accent"], fg="#fff", relief="flat", command=pick).pack()
         self._pick_win = win
 
-    def _apply_lyric(self, cand, bvid=None):
-        """选定候选 → 开歌词窗 + 持久化记录"""
+    def _apply_lyric(self, cand, bvid=None, show_win=True):
+        """选定候选 → 持久化记录；show_win 控制是否显示悬浮歌词"""
         self._lyric_lines = cand["lines"]
         self._lyric_offset = 0.0
         self._last_lyric = None
-        self._show_lyric_win(f"{cand['name']} — {cand['artist']}")
+        if show_win:
+            self._show_lyric_win(f"{cand['name']} — {cand['artist']}")
         if bvid:
             self._lyric_map[bvid] = {
                 "id": cand["id"], "name": cand["name"],
@@ -820,7 +828,7 @@ class MusicApp:
         notify(self.root, f"🎤 已加载歌词《{rec['name']}》")
 
     def _show_lyric_win(self, title):
-        """桌面悬浮歌词：无边框·半透明·置顶·可拖，位置记忆在 lyrics.json"""
+        """桌面悬浮歌词：深底低透明度毛玻璃 + 白字黑影，可拖，位置记忆"""
         if self._lyric_win:
             try:
                 self._lyric_win.destroy()
@@ -829,38 +837,47 @@ class MusicApp:
         win = tk.Toplevel(self.root)
         win.overrideredirect(True)          # 无边框悬浮
         win.attributes("-topmost", True)
-        win.attributes("-alpha", 0.90)     # 半透明
         win.configure(bg="#0f0f23")
         # 位置：记住上次的，否则屏幕底部中间
         pos = self._lyric_map.get("_pos") or {}
         if not pos:
-            pos = {"x": max(0, (win.winfo_screenwidth() - 560) // 2),
-                   "y": win.winfo_screenheight() - 300}
-        win.geometry(f"560x150+{pos['x']}+{pos['y']}")
+            pos = {"x": max(0, (win.winfo_screenwidth() - 600) // 2),
+                   "y": win.winfo_screenheight() - 320}
+        win.geometry(f"600x150+{pos['x']}+{pos['y']}")
         win.update_idletasks()
-        win.attributes("-alpha", 0.90)     # 半透明（等窗口就绪后再设）
-        top = tk.Frame(win, bg="#0f0f23")
-        top.pack(fill="x", padx=8, pady=(4, 0))
-        tk.Button(top, text="−0.5s", font=("Microsoft YaHei", 7), bg="#1a1a3a",
-                  fg=C["muted"], relief="flat", activebackground="#2a2a4a",
-                  command=lambda: self._nudge_lyric(-0.5)).pack(side="left", padx=(0, 3))
-        tk.Button(top, text="+0.5s", font=("Microsoft YaHei", 7), bg="#1a1a3a",
-                  fg=C["muted"], relief="flat", activebackground="#2a2a4a",
-                  command=lambda: self._nudge_lyric(0.5)).pack(side="left")
-        tk.Label(top, text=title, font=("Microsoft YaHei", 8), bg="#0f0f23",
-                 fg=C["muted"]).pack(side="left", padx=10)
-        tk.Button(top, text="×", font=("Microsoft YaHei", 9, "bold"), bg="#1a1a3a",
-                  fg=C["muted"], relief="flat", activebackground="#8a1f1f",
-                  activeforeground="#fff", command=self._close_lyric).pack(side="right")
+        win.attributes("-alpha", 0.42)     # 毛玻璃：背景透出桌面，先就绪再设
 
-        # 歌词大字（可按住拖动）
-        self._lyric_label = tk.Label(
-            win, text="…", font=("Microsoft YaHei", 22, "bold"),
-            bg="#0f0f23", fg=C["fg"], wraplength=540, justify="center")
-        self._lyric_label.pack(fill="both", expand=True, pady=(2, 8))
-        self._lyric_label.bind("<Button-1>", self._lyric_drag_start)
-        self._lyric_label.bind("<B1-Motion>", self._lyric_drag_move)
-        self._lyric_label.bind("<ButtonRelease-1>", self._lyric_drag_end)
+        # 歌词大字：黑色阴影(下偏移2px) + 白色主字，叠放成描边效果
+        sh = tk.Label(win, text="…", font=("Microsoft YaHei", 24, "bold"),
+                      bg="#0f0f23", fg="#000000")
+        sh.place(relx=0.5, rely=0.55, x=2, y=2, anchor="center")
+        main = tk.Label(win, text="…", font=("Microsoft YaHei", 22, "bold"),
+                        bg="#0f0f23", fg="#ffffff", wraplength=560, justify="center")
+        main.place(relx=0.5, rely=0.55, anchor="center")
+        self._lyric_shadow = sh
+        self._lyric_label = main
+        # 拖动（按住歌词任意一处）
+        for w in (sh, main):
+            w.bind("<Button-1>", self._lyric_drag_start)
+            w.bind("<B1-Motion>", self._lyric_drag_move)
+            w.bind("<ButtonRelease-1>", self._lyric_drag_end)
+
+        # 底部微型控制条（半透明一体，hover 才亮）
+        bar = tk.Frame(win, bg="#0f0f23")
+        bar.place(relx=0.5, rely=0.92, anchor="s")
+        tk.Label(bar, text=title, font=("Microsoft YaHei", 8), bg="#0f0f23",
+                 fg="#9aa0b0").pack(side="left", padx=8)
+        for text, cmd in (("−0.5s", lambda: self._nudge_lyric(-0.5)),
+                          ("+0.5s", lambda: self._nudge_lyric(0.5))):
+            tk.Button(bar, text=text, font=("Microsoft YaHei", 8, "bold"),
+                      bg="#0f0f23", fg="#9aa0b0", relief="flat",
+                      activebackground="#2a2a4a", activeforeground="#fff",
+                      repeatdelay=300, repeatinterval=120,   # 长按连调，实时生效
+                      command=cmd).pack(side="left", padx=3)
+        tk.Button(bar, text="×", font=("Microsoft YaHei", 9, "bold"),
+                  bg="#0f0f23", fg="#9aa0b0", relief="flat",
+                  activebackground="#8a1f1f", activeforeground="#fff",
+                  command=self._close_lyric).pack(side="left", padx=6)
         self._lyric_win = win
 
     def _lyric_drag_start(self, e):
@@ -898,7 +915,7 @@ class MusicApp:
             self._lyric_win = None
 
     def _update_lyric(self, pos):
-        """按播放位置显示当前歌词行"""
+        """按播放位置显示当前歌词行（主字+阴影同步）"""
         if not self._lyric_lines or not self._lyric_label:
             return
         t = pos + self._lyric_offset
@@ -911,6 +928,9 @@ class MusicApp:
         if line != self._last_lyric:
             self._last_lyric = line
             self._lyric_label.configure(text=line or "…")
+            shadow = getattr(self, "_lyric_shadow", None)
+            if shadow:
+                shadow.configure(text=line or "…")
 
     def _play_toggle(self):
         """播放/暂停切换（一个按钮）"""
