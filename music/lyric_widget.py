@@ -12,7 +12,7 @@
                close
   qt → music: nudge|±0.5     pause     step|±1
 """
-import sys, json, socket, time, os
+import sys, json, socket, time, os, ctypes
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings, QTimer, QPropertyAnimation, QEasingCurve
 from PyQt5.QtGui import QPainter, QColor, QFont, QCursor
 from PyQt5.QtWidgets import (QApplication, QWidget, QToolButton,
@@ -20,6 +20,42 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QToolButton,
 
 PORT = 39462
 W, H = 960, 116
+
+# ── X11 真穿透：WA_TransparentForMouseEvents 只让 Qt 忽略事件，
+#    不改变 X11 输入区域，下层窗口仍收不到点击。清空 input shape 才真穿透。
+_X11 = ctypes.CDLL("libX11.so.6")
+_X11.XOpenDisplay.restype = ctypes.c_void_p
+_X11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+_X11.XFlush.argtypes = [ctypes.c_void_p]
+_dpy = _X11.XOpenDisplay(None)
+_XExt = ctypes.CDLL("libXext.so.6")   # XShape 扩展在 libXext
+_XExt.XShapeCombineRectangles.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+                                          ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                          ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+_SHAPE_INPUT = 2
+_SHAPE_SET = 0
+
+
+class XRect(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_short), ("y", ctypes.c_short),
+                ("w", ctypes.c_ushort), ("h", ctypes.c_ushort)]
+
+
+def _input_rects(widget, rects):
+    arr = (XRect * len(rects))(*[XRect(*r) for r in rects]) if rects else None
+    _XExt.XShapeCombineRectangles(_dpy, int(widget.winId()), _SHAPE_INPUT,
+                                 0, 0, arr, len(rects), _SHAPE_SET)
+    _X11.XFlush(_dpy)
+
+
+def input_pass(widget):
+    """清空输入区域 → 鼠标完全穿透，下面随便点"""
+    _input_rects(widget, [])
+
+
+def input_block(widget):
+    """恢复整窗输入（悬停浮现控制条时可点可拖）"""
+    _input_rects(widget, [(0, 0, widget.width(), widget.height())])
 
 
 class NetThread(QThread):
@@ -95,10 +131,10 @@ class LyricWindow(QWidget):
         if dy < 0 or dy + H > sc.height():
             dy = sc.height() - H - 40
         self.move(dx, dy)
-        # 主体鼠标穿透：只有小拖拽把手和控制条可交互
+        # 整窗穿透（X11 input shape 清空，真穿透不挡点击）；悬停浮现控制条时恢复输入
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        input_pass(self)
         self._drag = None
-        self._handle = None
         self.lines = []          # [(秒, 文本)]
         self.pos = 0.0
         self.duration = 0.0
@@ -148,10 +184,10 @@ class LyricWindow(QWidget):
         self._ctrl_anim.setDuration(160)
         self._ctrl_anim.setEasingCurve(QEasingCurve.OutCubic)
 
-        # 小拖拽把手：同样悬停才出现
-        self._handle = _Handle(self)
-        self._handle.setAttribute(Qt.WA_TransparentForMouseEvents, False)
-        self._handle.hide()
+        self.net = NetThread()
+        self.net.sig.connect(self.on_line)
+        self.net.start()
+        self._drag = None
 
         # 悬停检测：鼠标在窗口内停留 ≥1.2s → 浮现控制条；移出 → 隐藏并恢复穿透
         self._hover_t0 = None
@@ -160,31 +196,42 @@ class LyricWindow(QWidget):
         self._hover.timeout.connect(self._hover_check)
         self._hover.start(150)
 
-        self.net = NetThread()
-        self.net.sig.connect(self.on_line)
-        self.net.start()
-        self._drag = None
-
     # ── 悬停交互：平时纯文字穿透，悬停浮现控制条 ──
     def _show_ui(self):
         self._ui_shown = True
         self._ctrl.show()
-        self._handle.show()
         self._ctrl_anim.stop()
         self._ctrl_eff.setOpacity(0.0)
         self._ctrl_anim.setStartValue(0.0)
         self._ctrl_anim.setEndValue(1.0)
         self._ctrl_anim.start()
-        # 控制条可见期间可点（窗口拦截鼠标）；移开即恢复穿透
+        # 控制条可见期间可点可拖（整窗输入）；移开即恢复穿透
         self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        input_block(self)
 
     def _hide_ui(self):
         self._ui_shown = False
         self._ctrl.hide()
-        self._handle.hide()
         self._ctrl_anim.stop()
         # 恢复整窗穿透：字幕永不挡住下面的点击
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        input_pass(self)
+
+    # ── 整窗任意位置拖拽（悬停浮现控制条期间）──
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._drag = (e.globalPos().x() - self.x(), e.globalPos().y() - self.y())
+
+    def mouseMoveEvent(self, e):
+        if self._drag:
+            self.move(e.globalPos().x() - self._drag[0],
+                     e.globalPos().y() - self._drag[1])
+
+    def mouseReleaseEvent(self, e):
+        if self._drag:
+            self._qs.setValue("x", self.x())
+            self._qs.setValue("y", self.y())
+        self._drag = None
 
     def _hover_check(self):
         inside = self.geometry().contains(QCursor.pos())
