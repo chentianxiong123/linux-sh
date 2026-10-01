@@ -14,7 +14,7 @@
 """
 import sys, json, socket, time, os, ctypes
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings, QTimer, QPropertyAnimation, QEasingCurve
-from PyQt5.QtGui import QPainter, QColor, QFont, QCursor, QBitmap
+from PyQt5.QtGui import QPainter, QColor, QFont, QCursor
 from PyQt5.QtWidgets import (QApplication, QWidget, QToolButton,
                              QHBoxLayout, QPushButton, QGraphicsOpacityEffect)
 
@@ -65,8 +65,11 @@ def input_pass(widget):
 
 
 def input_block(widget):
-    """恢复整窗输入（悬停浮现控制条时可点可拖）"""
-    _input_pixmap_mask(widget, 1, widget.width(), widget.height())
+    """恢复整窗输入（悬停浮现控制条时可点可拖）；
+    HiDPI 下 X 窗口是物理像素，pixmap 必须 ×devicePixelRatio"""
+    r = widget.devicePixelRatioF() or 1.0
+    _input_pixmap_mask(widget, 1, max(1, int(widget.width() * r)),
+                       max(1, int(widget.height() * r)))
 
 
 class NetThread(QThread):
@@ -206,22 +209,7 @@ class LyricWindow(QWidget):
         self._hover.timeout.connect(self._hover_check)
         self._hover.start(150)
 
-    # ── 面积/穿透：窗口裁剪成当前句文字形状（与绘制同坐标，不截字）──
-    def _apply_mask(self, txt, fm, font):
-        bm = QBitmap(self.width(), H)          # 与窗口同尺寸，坐标与绘制一致
-        bm.fill(Qt.color0)
-        p = QPainter(bm)
-        p.setPen(Qt.color1)
-        p.setFont(font)
-        tw = fm.horizontalAdvance(txt)
-        x = max(0, (self.width() - tw) // 2)
-        y_center = H // 2
-        baseline = y_center + (fm.ascent() - fm.descent()) // 2
-        p.drawText(x, baseline, txt)           # 与 paintEvent 同 x/baseline
-        p.end()
-        self.setMask(bm)
-
-    # ── 悬停交互：平时纯文字穿透，悬停浮现控制条 ──
+    # ── 悬停交互：平时全穿透，悬停浮现控制条可点 ──
     def _show_ui(self):
         self._ui_shown = True
         self._ctrl.show()
@@ -230,19 +218,18 @@ class LyricWindow(QWidget):
         self._ctrl_anim.setStartValue(0.0)
         self._ctrl_anim.setEndValue(1.0)
         self._ctrl_anim.start()
-        # 控制条可见期间可点可拖（整窗输入 + 取消文字裁剪）；移开即恢复
+        # 恢复整窗输入（bounding 恒整窗：不能用 setMask 裁剪，
+        # 否则控制条落在窗口形状外不可点）
         self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
         input_block(self)
-        self.clearMask()
 
     def _hide_ui(self):
         self._ui_shown = False
         self._ctrl.hide()
         self._ctrl_anim.stop()
-        # 恢复：X11 输入区域清空 + 文字形状裁剪（双保险穿透）
+        # 恢复：X11 输入区域清空 → 全穿透（透明区域也不挡）
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         input_pass(self)
-        self.update()   # paintEvent 里重设文字 mask
 
     # ── 整窗任意位置拖拽（悬停浮现控制条期间）──
     def mousePressEvent(self, e):
@@ -310,9 +297,6 @@ class LyricWindow(QWidget):
             p.drawText(x + 2, baseline + 2, txt)    # 黑色阴影
             p.setPen(QColor(255, 255, 255))
             p.drawText(x, baseline, txt)            # 白色主字
-            # 平时窗口裁剪成文字形状（悬停显示控制条时不裁）
-            if not self._ui_shown:
-                self._apply_mask(txt, fm, font)
         p.end()
 
     def _current_index(self):
