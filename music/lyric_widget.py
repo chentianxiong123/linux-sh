@@ -131,9 +131,8 @@ class LyricWindow(QWidget):
         if dy < 0 or dy + H > sc.height():
             dy = sc.height() - H - 40
         self.move(dx, dy)
-        # 整窗穿透（X11 input shape 清空，真穿透不挡点击）；悬停浮现控制条时恢复输入
+        # 整窗穿透（showEvent 里用 X11 input shape 真正清空输入区域）
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        input_pass(self)
         self._drag = None
         self.lines = []          # [(秒, 文本)]
         self.pos = 0.0
@@ -247,6 +246,14 @@ class LyricWindow(QWidget):
                 self._hide_ui()
 
     # ── 渲染 ──
+    def showEvent(self, e):
+        """窗口真正创建后(ARGB visual 就绪)才设输入穿透——
+        __init__ 里设会强制提前建窗，show 时 Qt 重建导致 winId 变、shape 丢失"""
+        super().showEvent(e)
+        if not getattr(self, "_shape_done", False):
+            self._shape_done = True
+            input_pass(self)
+
     def paintEvent(self, _e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
@@ -259,7 +266,16 @@ class LyricWindow(QWidget):
             from PyQt5.QtGui import QFontMetrics
             fm = QFontMetrics(font)
             tw = fm.horizontalAdvance(txt)
-            x = max(0, (W - tw) // 2)
+            # 面积兜底：窗口宽度随文字自适应（不整条 960 占位）
+            target = max(240, min(tw + 90, 1500))
+            if abs(self.width() - target) > 24:
+                self.resize(target, H)
+                self._ctrl.setGeometry(0, H - 24, self.width(), 24)
+                if getattr(self, "_ui_shown", False):
+                    input_block(self)   # resize 后重设输入区域
+                elif getattr(self, "_shape_done", False):
+                    input_pass(self)
+            x = max(0, (self.width() - tw) // 2)
             y_center = H // 2                # 整窗垂直居中（平时无控制条）
             baseline = y_center + (fm.ascent() - fm.descent()) // 2
             p.setPen(QColor(0, 0, 0, 200))
@@ -286,6 +302,8 @@ class LyricWindow(QWidget):
             _, body, off = line.split("|", 2)
             self.lines = json.loads(body)
             self.offset = float(off)
+            self.pos = 0.0              # ★ 切歌：新歌词从 0 开始，旧 pos 不残留
+            self.duration = 0.0
             self._cur_idx = None
             self._sync_render()
         elif kind == "pos":
