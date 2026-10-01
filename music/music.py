@@ -455,6 +455,12 @@ class MusicApp:
         self._mode = "search"        # 列表模式: search / fav
         self._source = self.results  # 当前列表数据源（搜索/收藏共用）
         self._play_mode = "order"    # 播放模式: order循环 / random随机 / single单曲
+        self._lyric_lines = []   # 当前歌词 [(秒, 行)]
+        self._lyric_offset = 0.0 # 歌词手动微调偏移（秒）
+        self._last_lyric = None  # 上次显示的歌词行（去重刷新）
+        self._lyric_win = None   # 歌词窗
+        self._lyric_label = None # 歌词窗当前句 Label
+        self._pick_win = None    # 歌词候选窗
         self.volume = int(_load_pref().get("volume", DEFAULT_VOLUME))
         self.vol_pct = None   # 在 _build 里创建，滑杆回调可能先触发
         self.player = Player(on_tick=self._on_tick, on_end=self._on_end)
@@ -465,6 +471,16 @@ class MusicApp:
     def _on_close(self):
         """窗口关闭时清理所有进程"""
         self.player.stop()
+        if self._lyric_win:
+            try:
+                self._lyric_win.destroy()
+            except Exception:
+                pass
+        if self._pick_win:
+            try:
+                self._pick_win.destroy()
+            except Exception:
+                pass
         self.root.destroy()
 
     def _build(self):
@@ -674,10 +690,122 @@ class MusicApp:
                 self.player.start()
                 self.info.configure(text=f"🎵 {item['title']} — {item['author']} [{qn_label}]")
                 self.btn["play"].configure(text="⏸ 暂停")
+                self._offer_lyrics(item)   # 后台找歌词候选（不阻塞播放）
             except Exception as e:
                 self.info.configure(text=f"❌ {e}")
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _offer_lyrics(self, item):
+        """后台找歌词候选，找到后弹候选窗供选择"""
+        def work():
+            try:
+                song, _artist = _title_to_song(item.get("title", ""))
+                if not song:
+                    return
+                cands = _lyric_candidates(song)
+                if cands:
+                    self.root.after(0, lambda: self._show_lyric_picker(song, cands))
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_lyric_picker(self, song, cands):
+        """歌词候选窗：列表供选择，双击/回车选定"""
+        if self._pick_win:
+            try:
+                self._pick_win.destroy()
+            except Exception:
+                pass
+        win = tk.Toplevel(self.root)
+        win.title(f"🎤 歌词候选《{song}》")
+        win.configure(bg=C["card"])
+        win.attributes("-topmost", True)
+        win.geometry("460x320")
+        tk.Label(win, text=f"《{song}》 选择歌词版本：", font=("Microsoft YaHei", 10, "bold"),
+                 bg=C["card"], fg=C["fg"]).pack(anchor="w", padx=12, pady=(10, 2))
+        lb = tk.Listbox(win, bg=C["card"], fg=C["fg"], selectbackground=C["accent"],
+                        selectforeground="#fff", font=("Microsoft YaHei", 9), relief="flat")
+        for i, c in enumerate(cands):
+            lb.insert("end", f"{c['name']} — {c['artist']}  ({c['dur']//60}:{c['dur']%60:02d})")
+        lb.pack(fill="both", expand=True, padx=12, pady=4)
+        if cands:
+            lb.selection_set(0)
+        def pick():
+            sel = lb.curselection()
+            if sel:
+                self._apply_lyric(cands[sel[0]])
+                win.destroy()
+        lb.bind("<Double-Button-1>", lambda e: pick())
+        btn = tk.Button(win, text="选定歌词", font=("Microsoft YaHei", 9),
+                        bg=C["accent"], fg="#fff", relief="flat", command=pick)
+        btn.pack(pady=(0, 10))
+        self._pick_win = win
+
+    def _apply_lyric(self, cand):
+        """选定候选 → 开歌词窗"""
+        self._lyric_lines = cand["lines"]
+        self._lyric_offset = 0.0
+        self._last_lyric = None
+        self._show_lyric_win(f"{cand['name']} — {cand['artist']}")
+
+    def _show_lyric_win(self, title):
+        """歌词窗：当前句大字 + 微调偏移按钮"""
+        if self._lyric_win:
+            try:
+                self._lyric_win.destroy()
+            except Exception:
+                pass
+        win = tk.Toplevel(self.root)
+        win.title("🎤 歌词")
+        win.configure(bg="#0f0f23")
+        win.attributes("-topmost", True)
+        win.geometry("520x220")
+        tk.Label(win, text=title, font=("Microsoft YaHei", 10, "bold"),
+                 bg="#0f0f23", fg=C["muted"]).pack(pady=(10, 0))
+        self._lyric_label = tk.Label(
+            win, text="…", font=("Microsoft YaHei", 20, "bold"),
+            bg="#0f0f23", fg=C["fg"], wraplength=480, justify="center")
+        self._lyric_label.pack(fill="both", expand=True, pady=10)
+        bar = tk.Frame(win, bg="#0f0f23")
+        bar.pack(pady=(0, 10))
+        tk.Button(bar, text="−0.5s", font=("Microsoft YaHei", 9), bg="#1a1a3a", fg=C["fg"],
+                  relief="flat", command=lambda: self._nudge_lyric(-0.5)).pack(side="left", padx=4)
+        tk.Button(bar, text="+0.5s", font=("Microsoft YaHei", 9), bg="#1a1a3a", fg=C["fg"],
+                  relief="flat", command=lambda: self._nudge_lyric(0.5)).pack(side="left", padx=4)
+        tk.Button(bar, text="关闭", font=("Microsoft YaHei", 9), bg="#1a1a3a", fg=C["fg"],
+                  relief="flat", command=self._close_lyric).pack(side="left", padx=4)
+        self._lyric_win = win
+
+    def _nudge_lyric(self, delta):
+        """手动微调歌词偏移"""
+        self._lyric_offset += delta
+        self._last_lyric = None
+        self._update_lyric(getattr(self, "_last_pos", 0))
+
+    def _close_lyric(self):
+        self._lyric_lines = []
+        if self._lyric_win:
+            try:
+                self._lyric_win.destroy()
+            except Exception:
+                pass
+            self._lyric_win = None
+
+    def _update_lyric(self, pos):
+        """按播放位置显示当前歌词行"""
+        if not self._lyric_lines or not self._lyric_label:
+            return
+        t = pos + self._lyric_offset
+        line = ""
+        for ts, txt in self._lyric_lines:
+            if ts <= t:
+                line = txt
+            else:
+                break
+        if line != self._last_lyric:
+            self._last_lyric = line
+            self._lyric_label.configure(text=line or "…")
 
     def _play_toggle(self):
         """播放/暂停切换（一个按钮）"""
@@ -744,11 +872,13 @@ class MusicApp:
     def _on_tick(self, pos, dur):
         if dur <= 0:
             return
+        self._last_pos = pos
         self.cur.configure(text=_fmt(pos))
         self.tot.configure(text=_fmt(dur))
         # 拖动中不覆盖进度条显示
         if self._seek_drag_ratio is None:
             self._draw_seek(min(1.0, pos / dur))
+        self._update_lyric(pos)
 
     def _on_end(self):
         """一曲结束：按播放模式切换下一曲"""
@@ -844,6 +974,67 @@ def _fmt_dur(s):
     if sec < 0:
         return s
     return f"{sec // 60}:{sec % 60:02d}"
+
+
+def _title_to_song(title):
+    """B站标题 → (歌名, 歌手提示)；剥 []【】后取《歌名》，取不到返回 None"""
+    clean = re.sub(r"[\[【].*?[\]】]", "", title or "")
+    m = re.search(r"《([^》]+)》", clean)
+    if m:
+        return m.group(1).strip(), None
+    return None, None
+
+
+def _fetch_lyric(sid):
+    """网易云歌词 LRC 文本（sid=歌曲id）；无词返回空串"""
+    try:
+        r = _req("https://music.163.com/api/song/lyric",
+                 params={"id": sid, "lv": 1, "kv": 1, "tv": -1})
+        j = r.json()
+        if j.get("code") == 200:
+            return j.get("lrc", {}).get("lyric", "") or ""
+    except Exception:
+        pass
+    return ""
+
+
+def _parse_lrc(text):
+    """LRC 文本 → [(秒, 歌词行)]，按时间升序"""
+    out = []
+    for ln in text.splitlines():
+        m = re.match(r"\[(\d+):(\d+(?:\.\d+)?)\]", ln.strip())
+        if m:
+            t = int(m.group(1)) * 60 + float(m.group(2))
+            txt = ln.strip()[m.end():].strip()
+            if txt and not txt.startswith(("作词", "作曲", "编曲", "制作", "录音", "混音", "监制", "OP:", "SP:", "和声", "配唱")):
+                out.append((t, txt))
+    out.sort()
+    return out
+
+
+def _lyric_candidates(song, limit=8):
+    """搜歌名 → 候选列表（只留有歌词的），[(id,name,artist,dur,lines)]"""
+    try:
+        r = _req("https://music.163.com/api/search/get/web",
+                 params={"s": song, "type": 1, "limit": limit, "offset": 0})
+        songs = r.json().get("result", {}).get("songs", []) or []
+    except Exception:
+        return []
+    out = []
+    for c in songs:
+        sid = c.get("id")
+        if not sid:
+            continue
+        lines = _parse_lrc(_fetch_lyric(sid))
+        if len(lines) >= 3:
+            out.append({
+                "id": sid,
+                "name": c.get("name", ""),
+                "artist": c["artists"][0]["name"] if c.get("artists") else "",
+                "dur": c.get("duration", 0) // 1000,
+                "lines": lines,
+            })
+    return out
 
 
 def _fmt(sec):
