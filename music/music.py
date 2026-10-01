@@ -554,19 +554,26 @@ class MusicApp:
             except Exception:
                 break
             self._lyr_sock = conn
-            self._lyr_sock.settimeout(0.5)
-            f = conn.makefile("r", encoding="utf-8")
+            self._lyr_sock.settimeout(0.2)
+            # 不用 makefile：Python3.13 makefile 超时一次就抛
+            # "cannot read from timed out object"(非socket.timeout)，
+            # 会被误判为断开 → 连接每0.5s被掐、挂件命令全丢。
+            # 用 recv 手动缓冲行，超时=继续等。
+            buf = b""
             while True:
                 try:
-                    line = f.readline()
+                    chunk = conn.recv(4096)
                 except socket.timeout:
-                    continue   # ★ 超时 ≠ 断开：连接保持，否则每0.5s被掐导致挂件命令发不出去
+                    continue   # 超时 ≠ 断开
                 except Exception:
                     break
-                if not line:
+                if not chunk:
                     break
-                if line.strip():
-                    self.root.after(0, self._lyr_cmd, line.strip())
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    if line.strip():
+                        self.root.after(0, self._lyr_cmd, line.strip().decode("utf-8", "ignore"))
             try:
                 conn.close()
             except Exception:
