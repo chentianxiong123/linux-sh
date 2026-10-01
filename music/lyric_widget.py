@@ -43,6 +43,40 @@ class NetThread(QThread):
                 time.sleep(0.5)
 
 
+class _Handle(QWidget):
+    """左上角小拖拽把手：唯一可拖动区域（其余窗口主体鼠标穿透）"""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setGeometry(12, 10, 30, 16)
+        self.setCursor(Qt.SizeAllCursor)
+        self._drag = None
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setPen(QColor(255, 255, 255, 100))
+        for i in range(3):
+            x = 8 + i * 7
+            p.drawLine(x, 5, x, 11)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            w = self.window()
+            self._drag = (e.globalPos().x() - w.x(), e.globalPos().y() - w.y())
+
+    def mouseMoveEvent(self, e):
+        if self._drag:
+            self.window().move(e.globalPos().x() - self._drag[0],
+                               e.globalPos().y() - self._drag[1])
+
+    def mouseReleaseEvent(self, e):
+        if self._drag:
+            w = self.window()
+            w._qs.setValue("x", w.x())
+            w._qs.setValue("y", w.y())
+        self._drag = None
+
+
 class LyricWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -50,10 +84,21 @@ class LyricWindow(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)   # ★ 背景真透明
         self.setWindowTitle("桌面歌词")
         self.resize(W, H)
-        # 位置记忆
+        # 位置记忆（校验在屏幕内，否则居中；默认屏幕水平居中）
         qs = QSettings(os.path.expanduser("~/.config/music/lyric_pos.ini"), QSettings.IniFormat)
         self._qs = qs
-        self.move(int(qs.value("x", 600, int)), int(qs.value("y", 700, int)))
+        sc = QApplication.primaryScreen().availableGeometry()
+        dx = int(qs.value("x", (sc.width() - W) // 2, int))
+        dy = int(qs.value("y", sc.height() - H - 40, int))
+        if dx < 0 or dx + W > sc.width():
+            dx = (sc.width() - W) // 2
+        if dy < 0 or dy + H > sc.height():
+            dy = sc.height() - H - 40
+        self.move(dx, dy)
+        # 主体鼠标穿透：只有小拖拽把手和控制条可交互
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._drag = None
+        self._handle = None
         self.lines = []          # [(秒, 文本)]
         self.pos = 0.0
         self.offset = 0.0
@@ -88,6 +133,11 @@ class LyricWindow(QWidget):
         ctrl.setLayout(bar)
         ctrl.setGeometry(0, H - 26, W, 26)
         ctrl.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+
+        # 小拖拽把手（唯一可拖区域）
+        self._handle = _Handle(self)
+        self._handle.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        self._handle.raise_()
 
         self.net = NetThread()
         self.net.sig.connect(self.on_line)
@@ -167,25 +217,8 @@ class LyricWindow(QWidget):
         self.cmd(f"nudge|{d}")
 
     def cmd_close(self):
-        self.cmd("pause-hide")   # 通知主界面只藏不杀？简化：直接关窗 + notify
         self.cmd("close-ctrl")
         self.close()
-
-    # ── 拖动 ──
-    def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton:
-            self._drag = (e.globalPos().x() - self.x(), e.globalPos().y() - self.y())
-
-    def mouseMoveEvent(self, e):
-        if self._drag:
-            self.move(e.globalPos().x() - self._drag[0],
-                      e.globalPos().y() - self._drag[1])
-
-    def mouseReleaseEvent(self, e):
-        self._drag = None
-        self._qs.setValue("x", self.x())
-        self._qs.setValue("y", self.y())
-
 
 def main():
     app = QApplication(sys.argv)

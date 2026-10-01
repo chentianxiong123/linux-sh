@@ -1014,38 +1014,36 @@ class MusicApp:
         self._close_lyric_win_only()
 
     def _update_lyric(self, pos):
-        """歌词页 Canvas：当前句居中大字，上下句渐变缩小，形成浮动流动"""
+        """歌词页 Canvas 流动渲染 + 无条件推送位置给桌面挂件"""
         canvas = getattr(self, "_lyric_canvas", None)
-        if not self._lyric_lines or not canvas:
-            return
-        t = pos + self._lyric_offset
-        idx = -1
-        for k, (s, _t) in enumerate(self._lyric_lines):
-            if s <= t:
-                idx = k
-            else:
-                break
-        if idx != self._last_lyric_idx:
-            self._last_lyric_idx = idx
-            canvas.delete("lyr")
-            cx = canvas.winfo_width() / 2
-            cy = canvas.winfo_height() / 2
-            rows = [(-2, 11, "#5a5a6a"), (-1, 13, "#8a8a9a"),
-                    (0, 25, "#ffffff"),
-                    (1, 13, "#8a8a9a"), (2, 11, "#5a5a6a")]
-            for off, size, color in rows:
-                k = idx + off
-                if 0 <= k < len(self._lyric_lines):
-                    txt = self._lyric_lines[k][1]
-                    font = ("Microsoft YaHei", size, "bold") if off == 0 else ("Microsoft YaHei", size)
-                    # 当前句黑阴影描边
-                    if off == 0:
-                        canvas.create_text(cx + 2, cy + off * 36 + 2, text=txt,
-                                           font=("Microsoft YaHei", size, "bold"),
-                                           fill="#1a1a2a", tags="lyr")
-                    canvas.create_text(cx, cy + off * 36, text=txt, font=font,
-                                       fill=color, tags="lyr")
-        # 同步桌面挂件位置
+        if self._lyric_lines and canvas:
+            t = pos + self._lyric_offset
+            idx = -1
+            for k, (s, _t) in enumerate(self._lyric_lines):
+                if s <= t:
+                    idx = k
+                else:
+                    break
+            if idx != self._last_lyric_idx:
+                self._last_lyric_idx = idx
+                canvas.delete("lyr")
+                cx = canvas.winfo_width() / 2
+                cy = canvas.winfo_height() / 2
+                rows = [(-2, 11, "#5a5a6a"), (-1, 13, "#8a8a9a"),
+                        (0, 25, "#ffffff"),
+                        (1, 13, "#8a8a9a"), (2, 11, "#5a5a6a")]
+                for off, size, color in rows:
+                    k = idx + off
+                    if 0 <= k < len(self._lyric_lines):
+                        txt = self._lyric_lines[k][1]
+                        font = ("Microsoft YaHei", size, "bold") if off == 0 else ("Microsoft YaHei", size)
+                        if off == 0:
+                            canvas.create_text(cx + 2, cy + off * 36 + 2, text=txt,
+                                               font=("Microsoft YaHei", size, "bold"),
+                                               fill="#1a1a2a", tags="lyr")
+                        canvas.create_text(cx, cy + off * 36, text=txt, font=font,
+                                           fill=color, tags="lyr")
+        # 桌面挂件位置推送（无论是否开歌词页，都保证挂件滚动）
         self._lyr_send(f"pos|{pos}|{getattr(self.player, 'duration', 0)}|"
                        + ("pause" if getattr(self.player, "paused", False) else "play"))
 
