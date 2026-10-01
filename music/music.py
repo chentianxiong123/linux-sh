@@ -723,7 +723,7 @@ class MusicApp:
         for key, text, cmd in [("mode", "🔁 循环", self._cycle_mode),
                                ("play", "▶ 播放", self._play_toggle),
                                ("fav", "☆ 收藏", self._fav_toggle),
-                               ("lyric", "🎤 歌词", self._open_lyric_picker)]:
+                               ("lyric", "🎤 歌词", self._open_lyric_page)]:
             bg = C["accent"] if key == "play" else C["active"]
             b = tk.Button(ctrl, text=text, font=f, bg=bg, fg="#fff",
                           activebackground=C["accent"], activeforeground="#fff",
@@ -832,23 +832,47 @@ class MusicApp:
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _open_lyric_picker(self):
-        """主界面🎤歌词按钮：歌词页入口（已有歌词直接开页，否则选歌词版本）"""
+    def _open_lyric_page(self):
+        """🎤 歌词按钮：打开歌词面板；无歌词则自动用搜到的第一个源"""
         if self.current is None or not self._source:
             notify(self.root, "⚠️ 先选择歌曲", "err")
             return
         item = self._source[self.current]
         self._cur_bvid = item.get("bvid")
         if self._lyric_lines:
-            # 已载歌词：直接开歌词页（不再自动弹任何东西）
             name = self._lyric_map.get(self._cur_bvid, {}).get("name", "")
             title = f"{name} — {item.get('author', '')}" if name else item.get("title", "")
             self._show_lyric_win(title)
             return
+        # 无歌词：自动拉第一个有词源进面板
         song, _artist = _title_to_song(item.get("title", ""))
         if not song:
             notify(self.root, "⚠️ 标题无《歌名》，无法搜歌词", "err")
             return
+        self.info.configure(text=f"⏳ 搜歌词...《{song}》")
+
+        def work():
+            try:
+                cands = _lyric_candidates(song)
+                if cands:
+                    self.root.after(0, lambda: self._apply_lyric(cands[0], item.get("bvid"), show_win=True, persist=False))
+                else:
+                    self.root.after(0, lambda: notify(self.root, "⚠️ 没搜到有歌词的版本", "err"))
+            except Exception as e:
+                self.root.after(0, lambda: notify(self.root, f"❌ {e}", "err"))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _open_lyric_picker(self):
+        """歌词面板内【🔎 搜索歌词】按钮：对当前曲弹候选窗换源"""
+        if self.current is None or not self._source:
+            notify(self.root, "⚠️ 先选择歌曲", "err")
+            return
+        item = self._source[self.current]
+        song, _artist = _title_to_song(item.get("title", ""))
+        if not song:
+            notify(self.root, "⚠️ 标题无《歌名》，无法搜歌词", "err")
+            return
+        self._cur_bvid = item.get("bvid")
         self.info.configure(text=f"⏳ 搜歌词...《{song}》")
 
         def work():
@@ -906,16 +930,16 @@ class MusicApp:
                   bg=C["accent"], fg="#fff", relief="flat", command=pick).pack()
         self._pick_win = win
 
-    def _apply_lyric(self, cand, bvid=None, show_win=True):
-        """选定候选 → 开歌词页 + 持久化；桌面挂件由开关决定（播放时自动）"""
+    def _apply_lyric(self, cand, bvid=None, show_win=True, persist=True):
+        """应用歌词源；persist=False 表示默认第一源（不写设置，播放时总默认第一源）"""
         self._lyric_lines = cand["lines"]
         self._lyric_offset = 0.0
         self._last_lyric = None
         if show_win:
             self._show_lyric_win(f"{cand['name']} — {cand['artist']}")
         elif self._lyric_on.get():
-            self._push_lyric(f"{cand['name']} — {cand['artist']}")   # 仅挂件
-        if bvid:
+            self._push_lyric(f"{cand['name']} — {cand['artist']}")
+        if bvid and persist:
             self._lyric_map[bvid] = {
                 "id": cand["id"], "name": cand["name"],
                 "artist": cand["artist"], "dur": cand["dur"], "offset": 0.0,
@@ -924,28 +948,41 @@ class MusicApp:
             notify(self.root, f"💾 已记住《{cand['name']}》歌词，播放时自动桌面歌词")
 
     def _autoload_lyric(self, item):
-        """播放时：开关开着且这首已选过歌词 → 自动出桌面挂件（不弹页面）"""
+        """播放时：开关开着 → 优先已设置源，否则自动用搜到的第一个源，出桌面挂件"""
         if not self._lyric_on.get():
             return
-        rec = self._lyric_map.get(item.get("bvid", ""))
-        if not rec:
-            return
+        bvid = item.get("bvid", "")
+        rec = self._lyric_map.get(bvid)
+
         def work():
             try:
-                lines = _parse_lrc(_fetch_lyric(rec["id"]))
+                lines, offset, title = None, 0.0, ""
+                if rec:
+                    lines = _parse_lrc(_fetch_lyric(rec["id"]))
+                    title = f"{rec['name']} — {rec['artist']}"
+                    offset = rec.get("offset", 0.0)
+                else:
+                    # 未设置过：默认第一个源
+                    song, _a = _title_to_song(item.get("title", ""))
+                    if song:
+                        cands = _lyric_candidates(song)
+                        if cands:
+                            lines = cands[0]["lines"]
+                            title = f"{cands[0]['name']} — {cands[0]['artist']}"
                 if lines:
-                    self.root.after(0, lambda: self._apply_saved_lyric(rec, lines))
+                    self.root.after(0, lambda: self._autoload_apply(title, lines, offset))
             except Exception:
                 pass
         threading.Thread(target=work, daemon=True).start()
 
-    def _apply_saved_lyric(self, rec, lines):
-        """应用已存歌词版本 → 只推桌面挂件（自动流程）"""
+    def _autoload_apply(self, title, lines, offset):
+        """自动旋律歌词：只推桌面挂件（不弹页面）"""
         self._lyric_lines = lines
-        self._lyric_offset = rec.get("offset", 0.0)
+        self._lyric_offset = offset
         self._last_lyric = None
-        self._push_lyric(f"{rec['name']} — {rec['artist']}")
-        notify(self.root, f"🎤 已加载歌词《{rec['name']}》")
+        self._push_lyric(title)
+        song_name = title.split("—")[0].strip() if title else ""
+        notify(self.root, f"🎤 桌面歌词《{song_name}》")
 
     def _show_lyric_win(self, title):
         """歌词页：KTV 浮动流动效果——当前句居中大字，上下句渐变缩小流动"""
@@ -967,7 +1004,7 @@ class MusicApp:
         self._lyric_canvas = canvas
         self._last_lyric_idx = None
 
-        # 控制条：播放暂停 / 微调 / 关闭
+        # 控制条：播放暂停 / 搜索歌词 / 自动桌面歌词开关 / 微调 / 关闭
         bar = tk.Frame(win, bg=C["card"])
         bar.pack(pady=(0, 14))
         self._lyric_play_btn = tk.Button(
@@ -975,6 +1012,13 @@ class MusicApp:
             relief="flat", activebackground=C["accent"], activeforeground="#fff",
             command=self._play_toggle)
         self._lyric_play_btn.pack(side="left", padx=5)
+        tk.Button(bar, text="🔎 搜索歌词", font=("Microsoft YaHei", 9), bg=C["active"], fg=C["fg"],
+                  relief="flat", activebackground=C["accent"], activeforeground="#fff",
+                  command=self._open_lyric_picker).pack(side="left", padx=5)
+        tk.Checkbutton(bar, text="自动桌面歌词", variable=self._lyric_on,
+                       bg=C["card"], fg=C["fg"], selectcolor=C["card"],
+                       activebackground=C["card"], activeforeground=C["fg"],
+                       font=("Microsoft YaHei", 9), command=self._save_lyric_on).pack(side="left", padx=5)
         for text, cmd in (("−0.5s", lambda: self._nudge_lyric(-0.5)),
                           ("+0.5s", lambda: self._nudge_lyric(0.5))):
             tk.Button(bar, text=text, font=("Microsoft YaHei", 10), bg=C["active"], fg=C["fg"],
@@ -982,12 +1026,17 @@ class MusicApp:
                       repeatdelay=300, repeatinterval=120, command=cmd).pack(side="left", padx=5)
         tk.Button(bar, text="×", font=("Microsoft YaHei", 11, "bold"), bg=C["active"], fg=C["fg"],
                   relief="flat", activebackground="#8a1f1f", activeforeground="#fff",
-                  command=self._close_lyric).pack(side="left", padx=5)
+                  command=self._close_lyric).pack(side="left", padx=8)
         self._lyric_win = win
         # 打开即同步当前句
         self.root.after(1, lambda: self._update_lyric(getattr(self, "_last_pos", 0)))
         # 同时把歌词推到桌面透明挂件
         self._push_lyric(title)
+
+    def _save_lyric_on(self):
+        """自动桌面歌词开关 → 持久化"""
+        self._lyric_map["_on"] = self._lyric_on.get()
+        _save_lyric_map(self._lyric_map)
 
     def _close_lyric_win_only(self):
         """只关歌词页窗口，不清数据"""
