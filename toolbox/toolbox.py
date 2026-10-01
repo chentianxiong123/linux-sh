@@ -574,8 +574,8 @@ class ToolboxApp:
         if self._resize_pending:
             self.root.after_cancel(self._resize_pending)
         self._resize_pending = self.root.after(120, self._apply_layout)
-        # 记住窗口大小，退出/切换时保存
-        self._win_geometry = f"{event.width}x{event.height}"
+        # 记住窗口几何（含位置），退出/重启后还原
+        self._win_geometry = self.root.geometry()
 
     def _apply_layout(self):
         """根据当前窗口宽度重算列数并重绘"""

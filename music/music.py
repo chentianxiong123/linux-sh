@@ -816,12 +816,9 @@ class MusicApp:
         def work():
             try:
                 cid = _get_cid(item["bvid"])
-                # 历史条目带固定音质；搜索条目从下拉框读
-                if item.get("qn"):
-                    selected_qn = item["qn"]
-                else:
-                    qn_map = {"64k": AUDIO_64K, "128k": AUDIO_128K, "192k": AUDIO_192K}
-                    selected_qn = qn_map.get(self.qn_var.get(), PREFERRED_QN)
+                # 音质全局统一：一律由切换按钮决定，不按歌曲记忆
+                qn_map = {"64k": AUDIO_64K, "128k": AUDIO_128K, "192k": AUDIO_192K}
+                selected_qn = qn_map.get(self.qn_var.get(), PREFERRED_QN)
                 url, actual_qn, _mime = _get_audio_url(item["bvid"], cid, prefer_qn=selected_qn)
                 qn_label = {AUDIO_192K: "192k", AUDIO_128K: "128k",
                             AUDIO_64K: "64k", AUDIO_FLAC: "FLAC"}.get(actual_qn, f"{actual_qn}")
@@ -1169,14 +1166,12 @@ class MusicApp:
         elif already:
             notify(self.root, "★ 已在收藏夹")
         else:
-            qn_map = {"64k": AUDIO_64K, "128k": AUDIO_128K, "192k": AUDIO_192K}
-            qn = qn_map.get(self.qn_var.get(), PREFERRED_QN)
             _save_fav({
                 "bvid": bvid,
                 "title": item["title"],
                 "author": item.get("author", ""),
                 "duration": item.get("duration", ""),
-                "qn": qn,
+                # 音质不再按歌持久化：统一由全局切换按钮决定
             })
             self._update_fav_btn()
             notify(self.root, f"★ 已收藏: {item['title']}")

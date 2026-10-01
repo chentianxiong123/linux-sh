@@ -14,7 +14,7 @@
 """
 import sys, json, socket, time, os, ctypes
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings, QTimer, QPropertyAnimation, QEasingCurve
-from PyQt5.QtGui import QPainter, QColor, QFont, QCursor
+from PyQt5.QtGui import QPainter, QColor, QFont, QCursor, QBitmap
 from PyQt5.QtWidgets import (QApplication, QWidget, QToolButton,
                              QHBoxLayout, QPushButton, QGraphicsOpacityEffect)
 
@@ -195,6 +195,18 @@ class LyricWindow(QWidget):
         self._hover.timeout.connect(self._hover_check)
         self._hover.start(150)
 
+    # ── 面积/穿透终极：窗口裁剪成文字形状（非文字区物理不存在）──
+    def _apply_mask(self, txt, fm, font):
+        tw = fm.horizontalAdvance(txt)
+        bm = QBitmap(max(4, tw + 24), 56)
+        bm.fill(Qt.color0)
+        p = QPainter(bm)
+        p.setPen(Qt.color1)
+        p.setFont(font)
+        p.drawText(12, 12 + fm.ascent(), txt)
+        p.end()
+        self.setMask(bm)
+
     # ── 悬停交互：平时纯文字穿透，悬停浮现控制条 ──
     def _show_ui(self):
         self._ui_shown = True
@@ -204,17 +216,19 @@ class LyricWindow(QWidget):
         self._ctrl_anim.setStartValue(0.0)
         self._ctrl_anim.setEndValue(1.0)
         self._ctrl_anim.start()
-        # 控制条可见期间可点可拖（整窗输入）；移开即恢复穿透
+        # 控制条可见期间可点可拖（整窗输入 + 取消文字裁剪）；移开即恢复
         self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
         input_block(self)
+        self.clearMask()
 
     def _hide_ui(self):
         self._ui_shown = False
         self._ctrl.hide()
         self._ctrl_anim.stop()
-        # 恢复整窗穿透：字幕永不挡住下面的点击
+        # 恢复：X11 输入区域清空 + 文字形状裁剪（双保险穿透）
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         input_pass(self)
+        self.update()   # paintEvent 里重设文字 mask
 
     # ── 整窗任意位置拖拽（悬停浮现控制条期间）──
     def mousePressEvent(self, e):
@@ -282,6 +296,9 @@ class LyricWindow(QWidget):
             p.drawText(x + 2, baseline + 2, txt)    # 黑色阴影
             p.setPen(QColor(255, 255, 255))
             p.drawText(x, baseline, txt)            # 白色主字
+            # 平时窗口裁剪成文字形状（悬停显示控制条时不裁）
+            if not self._ui_shown:
+                self._apply_mask(txt, fm, font)
         p.end()
 
     def _current_index(self):
