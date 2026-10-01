@@ -13,10 +13,10 @@
   qt → music: nudge|±0.5     pause     step|±1
 """
 import sys, json, socket, time, os
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings, QTimer
-from PyQt5.QtGui import QPainter, QColor, QFont
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings, QTimer, QPropertyAnimation, QEasingCurve
+from PyQt5.QtGui import QPainter, QColor, QFont, QCursor
 from PyQt5.QtWidgets import (QApplication, QWidget, QToolButton,
-                             QHBoxLayout, QPushButton)
+                             QHBoxLayout, QPushButton, QGraphicsOpacityEffect)
 
 PORT = 39462
 W, H = 960, 116
@@ -113,44 +113,91 @@ class LyricWindow(QWidget):
         self.paused = False
         self.title = ""
 
-        # 底部控制条（透明底小按钮）
+        # 底部控制条：平时隐藏，鼠标悬停 1.2s 才淡入（窄按钮，不占位置）
         bar = QHBoxLayout()
-        bar.setContentsMargins(0, 0, 0, 0)
-        bar.setSpacing(4)
+        bar.setContentsMargins(8, 0, 8, 0)
+        bar.setSpacing(6)
         btn_style = (
-            "QPushButton{color:#c8c8d8;background:transparent;border:none;font-size:12px;}"
-            "QPushButton:hover{color:#ffffff;background:rgba(255,255,255,40);border-radius:3px;}"
+            "QPushButton{color:#d8d8e8;background:rgba(20,20,30,130);border:none;"
+            "font-size:11px;border-radius:4px;}"
+            "QPushButton:hover{color:#ffffff;background:rgba(255,255,255,70);}"
         )
-        def mk(text, cb):
+        def mk(text, cb, w):
             b = QPushButton(text)
             b.setStyleSheet(btn_style)
-            b.setFixedHeight(22)
+            b.setFixedSize(w, 20)
             b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(cb)
             return b
-        self.t_title = mk("-", lambda: None)
-        self.t_title.setStyleSheet("QPushButton{color:#8a8a98;background:transparent;border:none;font-size:11px;}")
-        self.t_pause = mk("⏸", self.on_pause)
-        self.t_minus = mk("−0.5s", lambda: self.on_nudge(-0.5))
-        self.t_plus = mk("+0.5s", lambda: self.on_nudge(0.5))
-        self.t_close = mk("×", self.cmd_close)
-        for b in (self.t_title, self.t_pause,
-                  self.t_minus, self.t_plus, self.t_close):
+        self.t_pause = mk("⏸", self.on_pause, 24)
+        self.t_minus = mk("−0.5", lambda: self.on_nudge(-0.5), 38)
+        self.t_plus = mk("+0.5", lambda: self.on_nudge(0.5), 38)
+        self.t_close = mk("×", self.cmd_close, 22)
+        for b in (self.t_pause, self.t_minus, self.t_plus, self.t_close):
             bar.addWidget(b)
+        bar.addStretch(1)
         ctrl = QWidget(self)
         ctrl.setLayout(bar)
-        ctrl.setGeometry(0, H - 26, W, 26)
-        ctrl.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        ctrl.setGeometry(0, H - 24, W, 24)
+        self._ctrl = ctrl
+        self._ctrl.hide()
+        # 淡入动画
+        self._ctrl_eff = QGraphicsOpacityEffect(self._ctrl)
+        self._ctrl.setGraphicsEffect(self._ctrl_eff)
+        self._ctrl_anim = QPropertyAnimation(self._ctrl_eff, b"opacity", self)
+        self._ctrl_anim.setDuration(160)
+        self._ctrl_anim.setEasingCurve(QEasingCurve.OutCubic)
 
-        # 小拖拽把手（唯一可拖区域）
+        # 小拖拽把手：同样悬停才出现
         self._handle = _Handle(self)
         self._handle.setAttribute(Qt.WA_TransparentForMouseEvents, False)
-        self._handle.raise_()
+        self._handle.hide()
+
+        # 悬停检测：鼠标在窗口内停留 ≥1.2s → 浮现控制条；移出 → 隐藏并恢复穿透
+        self._hover_t0 = None
+        self._ui_shown = False
+        self._hover = QTimer(self)
+        self._hover.timeout.connect(self._hover_check)
+        self._hover.start(150)
 
         self.net = NetThread()
         self.net.sig.connect(self.on_line)
         self.net.start()
         self._drag = None
+
+    # ── 悬停交互：平时纯文字穿透，悬停浮现控制条 ──
+    def _show_ui(self):
+        self._ui_shown = True
+        self._ctrl.show()
+        self._handle.show()
+        self._ctrl_anim.stop()
+        self._ctrl_eff.setOpacity(0.0)
+        self._ctrl_anim.setStartValue(0.0)
+        self._ctrl_anim.setEndValue(1.0)
+        self._ctrl_anim.start()
+        # 控制条可见期间可点（窗口拦截鼠标）；移开即恢复穿透
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+
+    def _hide_ui(self):
+        self._ui_shown = False
+        self._ctrl.hide()
+        self._handle.hide()
+        self._ctrl_anim.stop()
+        # 恢复整窗穿透：字幕永不挡住下面的点击
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+    def _hover_check(self):
+        inside = self.geometry().contains(QCursor.pos())
+        now = time.monotonic()
+        if inside:
+            if self._hover_t0 is None:
+                self._hover_t0 = now
+            elif now - self._hover_t0 >= 1.2 and not self._ui_shown:
+                self._show_ui()
+        else:
+            self._hover_t0 = None
+            if self._ui_shown:
+                self._hide_ui()
 
     # ── 渲染 ──
     def paintEvent(self, _e):
@@ -166,7 +213,7 @@ class LyricWindow(QWidget):
             fm = QFontMetrics(font)
             tw = fm.horizontalAdvance(txt)
             x = max(0, (W - tw) // 2)
-            y_center = H - 26 - 25           # 控制条(26px)上方居中
+            y_center = H // 2                # 整窗垂直居中（平时无控制条）
             baseline = y_center + (fm.ascent() - fm.descent()) // 2
             p.setPen(QColor(0, 0, 0, 200))
             p.drawText(x + 2, baseline + 2, txt)    # 黑色阴影
@@ -205,7 +252,6 @@ class LyricWindow(QWidget):
             self._sync_render()
         elif kind == "title":
             self.title = parts[1]
-            self.t_title.setText(parts[1])
         elif kind == "close":
             self.close()
 
