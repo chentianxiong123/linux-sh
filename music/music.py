@@ -489,6 +489,11 @@ class MusicApp:
         self._cur_bvid = None    # 当前播放/选词歌曲 bvid
         self._lyric_on = tk.BooleanVar(value=self._lyric_map.get("_on", True))  # 桌面歌词总开关（持久化）
         self._lyric_list = None  # 歌词页 Listbox
+        # 桌面透明挂件(Qt 进程)通信
+        self._lyr_sock = None
+        self._lyr_srv = None
+        self._lyr_proc = None
+        self._start_lyric_server()
         self.volume = int(_load_pref().get("volume", DEFAULT_VOLUME))
         self.vol_pct = None   # 在 _build 里创建，滑杆回调可能先触发
         self.player = Player(on_tick=self._on_tick, on_end=self._on_end)
@@ -497,11 +502,22 @@ class MusicApp:
         self._poll_tick()
 
     def _on_close(self):
-        """窗口关闭：停播放器、清理歌词页/候选窗"""
+        """窗口关闭：停播放器、关歌词页/候选窗/Qt 挂件"""
         try:
             self.player.stop()
         except Exception:
             pass
+        if self._lyr_sock:
+            try:
+                self._lyr_sock.sendall(b"close\n")
+                self._lyr_sock.close()
+            except Exception:
+                pass
+        if self._lyr_proc:
+            try:
+                self._lyr_proc.terminate()
+            except Exception:
+                pass
         for w in (self._pick_win, self._lyric_win):
             if w:
                 try:
@@ -509,6 +525,97 @@ class MusicApp:
                 except Exception:
                     pass
         self.root.destroy()
+
+    def _start_lyric_server(self):
+        """本地监听，等 Qt 挂件连入"""
+        try:
+            self._lyr_srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._lyr_srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._lyr_srv.bind(("127.0.0.1", 39462))
+            self._lyr_srv.listen(1)
+            self._lyr_srv.settimeout(1)
+        except Exception:
+            self._lyr_srv = None
+        threading.Thread(target=self._lyr_accept, daemon=True).start()
+
+    def _lyr_accept(self):
+        """接受 Qt 挂件连接，读它的命令"""
+        while self._lyr_srv:
+            try:
+                conn, _ = self._lyr_srv.accept()
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+            self._lyr_sock = conn
+            self._lyr_sock.settimeout(0.5)
+            f = conn.makefile("r", encoding="utf-8")
+            while True:
+                try:
+                    line = f.readline()
+                except Exception:
+                    break
+                if not line:
+                    break
+                if line.strip():
+                    self.root.after(0, self._lyr_cmd, line.strip())
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._lyr_sock = None
+
+    def _lyr_send(self, msg):
+        """推送消息给 Qt 挂件"""
+        if self._lyr_sock:
+            try:
+                self._lyr_sock.sendall((msg + "\n").encode())
+            except Exception:
+                pass
+
+    def _lyr_cmd(self, line):
+        """Qt 挂件发来的命令"""
+        parts = line.split("|")
+        if parts[0] == "nudge" and len(parts) > 1:
+            try:
+                self._nudge_lyric(float(parts[1]))
+            except Exception:
+                pass
+        elif parts[0] == "pause":
+            self._play_toggle()
+        elif parts[0] == "step" and len(parts) > 1:
+            try:
+                self._step(int(parts[1]))
+            except Exception:
+                pass
+        elif parts[0] == "close-ctrl":
+            self._close_lyric()
+
+    def _ensure_lyric_qt(self):
+        """确保 Qt 挂件进程在跑"""
+        if self._lyr_proc and self._lyr_proc.poll() is None:
+            return
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lyric_widget.py")
+        try:
+            self._lyr_proc = subprocess.Popen(
+                [sys.executable, script],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            self._lyr_proc = None
+
+    def _push_lyric(self, title):
+        """推送歌词给 Qt 挂件（spawn + 等连接）"""
+        self._ensure_lyric_qt()
+
+        def send():
+            for _ in range(4):
+                if self._lyr_sock:
+                    break
+                time.sleep(0.5)
+            self._lyr_send(f"title|{title}")
+            self._lyr_send(f"lyric|{json.dumps(self._lyric_lines, ensure_ascii=True)}|{self._lyric_offset}")
+        threading.Thread(target=send, daemon=True).start()
 
     def _build(self):
         pad = {"padx": 12, "pady": 6}
@@ -884,6 +991,8 @@ class MusicApp:
         self._lyric_win = win
         # 打开即同步当前句
         self.root.after(1, lambda: self._update_lyric(getattr(self, "_last_pos", 0)))
+        # 同时把歌词推到桌面透明挂件
+        self._push_lyric(title)
 
     def _close_lyric_win_only(self):
         """只关歌词页窗口，不清数据"""
@@ -895,16 +1004,18 @@ class MusicApp:
             self._lyric_win = None
 
     def _nudge_lyric(self, delta):
-        """手动微调歌词偏移（即时刷新 + 持久化到这首歌的记录）"""
+        """手动微调歌词偏移（即时刷新 + 持久化 + 同步挂件）"""
         self._lyric_offset += delta
         self._last_lyric = None
         self._update_lyric(getattr(self, "_last_pos", 0))
+        self._lyr_send(f"lyric|{json.dumps(self._lyric_lines, ensure_ascii=True)}|{self._lyric_offset}")
         if self._cur_bvid and self._cur_bvid in self._lyric_map:
             self._lyric_map[self._cur_bvid]["offset"] = self._lyric_offset
             _save_lyric_map(self._lyric_map)
 
     def _close_lyric(self):
         self._lyric_lines = []
+        self._lyr_send("close")
         self._close_lyric_win_only()
 
     def _update_lyric(self, pos):
@@ -925,6 +1036,9 @@ class MusicApp:
             if idx >= 0:
                 lb.selection_set(idx)
                 lb.see(idx)   # 自动滚动到当前句
+        # 同步桌面挂件位置
+        self._lyr_send(f"pos|{pos}|{getattr(self.player, 'duration', 0)}|"
+                       + ("pause" if getattr(self.player, "paused", False) else "play"))
 
     def _play_toggle(self):
         """播放/暂停切换（主界面按钮 + 歌词页按钮同步）"""
