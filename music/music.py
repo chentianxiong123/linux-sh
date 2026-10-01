@@ -25,6 +25,7 @@ import requests
 
 # ── 收藏：只存 ID/标题，不缓存音频 ────────────────
 FAV_FILE = Path.home() / ".config" / "music" / "favorites.json"
+LYRIC_MAP_FILE = Path.home() / ".config" / "music" / "lyrics.json"  # bvid → 已选歌词版本+偏移
 CFG_FILE = Path.home() / ".config" / "music" / "settings.json"   # 音量等偏好
 DEFAULT_VOLUME = 100
 
@@ -78,6 +79,29 @@ def _save_fav(entry):
             json.dump(favs, f, ensure_ascii=True)
     except Exception as e:
         print(f"[收藏保存失败] {e}", file=sys.stderr)
+
+
+def _load_lyric_map():
+    """读取已选歌词记录 {bvid: {id,name,artist,dur,offset}}"""
+    try:
+        if LYRIC_MAP_FILE.exists():
+            with open(LYRIC_MAP_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_lyric_map(lyric_map):
+    """持久化已选歌词记录"""
+    try:
+        LYRIC_MAP_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(LYRIC_MAP_FILE, "w", encoding="utf-8") as f:
+            json.dump(lyric_map, f, ensure_ascii=True)
+    except Exception as e:
+        print(f"[歌词记录保存失败] {e}", file=sys.stderr)
 
 
 def _remove_fav(bvid):
@@ -461,6 +485,8 @@ class MusicApp:
         self._lyric_win = None   # 歌词窗
         self._lyric_label = None # 歌词窗当前句 Label
         self._pick_win = None    # 歌词候选窗
+        self._lyric_map = _load_lyric_map()  # bvid → 已选歌词版本
+        self._cur_bvid = None    # 当前播放/选词歌曲 bvid
         self.volume = int(_load_pref().get("volume", DEFAULT_VOLUME))
         self.vol_pct = None   # 在 _build 里创建，滑杆回调可能先触发
         self.player = Player(on_tick=self._on_tick, on_end=self._on_end)
@@ -588,7 +614,8 @@ class MusicApp:
         self.btn = {}
         for key, text, cmd in [("mode", "🔁 循环", self._cycle_mode),
                                ("play", "▶ 播放", self._play_toggle),
-                               ("fav", "☆ 收藏", self._fav_toggle)]:
+                               ("fav", "☆ 收藏", self._fav_toggle),
+                               ("lyric", "🎤 歌词", self._open_lyric_picker)]:
             bg = C["accent"] if key == "play" else C["active"]
             b = tk.Button(ctrl, text=text, font=f, bg=bg, fg="#fff",
                           activebackground=C["accent"], activeforeground="#fff",
@@ -690,27 +717,38 @@ class MusicApp:
                 self.player.start()
                 self.info.configure(text=f"🎵 {item['title']} — {item['author']} [{qn_label}]")
                 self.btn["play"].configure(text="⏸ 暂停")
-                self._offer_lyrics(item)   # 后台找歌词候选（不阻塞播放）
+                self._cur_bvid = item.get("bvid")
+                self._autoload_lyric(item)   # 若这首已选过歌词，自动加载（不弹窗）
             except Exception as e:
                 self.info.configure(text=f"❌ {e}")
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _offer_lyrics(self, item):
-        """后台找歌词候选，找到后弹候选窗供选择"""
+    def _open_lyric_picker(self):
+        """主界面🎤歌词按钮：对当前选中歌曲弹歌词候选窗"""
+        if self.current is None or not self._source:
+            notify(self.root, "⚠️ 先选择歌曲", "err")
+            return
+        item = self._source[self.current]
+        song, _artist = _title_to_song(item.get("title", ""))
+        if not song:
+            notify(self.root, "⚠️ 标题无《歌名》，无法搜歌词", "err")
+            return
+        self._cur_bvid = item.get("bvid")
+        self.info.configure(text=f"⏳ 搜歌词...《{song}》")
+
         def work():
             try:
-                song, _artist = _title_to_song(item.get("title", ""))
-                if not song:
-                    return
                 cands = _lyric_candidates(song)
                 if cands:
-                    self.root.after(0, lambda: self._show_lyric_picker(song, cands))
-            except Exception:
-                pass
+                    self.root.after(0, lambda: self._show_lyric_picker(song, cands, item.get("bvid")))
+                else:
+                    self.root.after(0, lambda: notify(self.root, "⚠️ 没搜到有歌词的版本", "err"))
+            except Exception as e:
+                self.root.after(0, lambda: notify(self.root, f"❌ {e}", "err"))
         threading.Thread(target=work, daemon=True).start()
 
-    def _show_lyric_picker(self, song, cands):
+    def _show_lyric_picker(self, song, cands, bvid=None):
         """歌词候选窗：列表供选择，双击/回车选定"""
         if self._pick_win:
             try:
@@ -721,33 +759,65 @@ class MusicApp:
         win.title(f"🎤 歌词候选《{song}》")
         win.configure(bg=C["card"])
         win.attributes("-topmost", True)
-        win.geometry("460x320")
-        tk.Label(win, text=f"《{song}》 选择歌词版本：", font=("Microsoft YaHei", 10, "bold"),
+        win.geometry("460x340")
+        saved = self._lyric_map.get(bvid or "")
+        head = f"《{song}》 选择歌词版本：" + (f"（已存：{saved['name']}）" if saved else "")
+        tk.Label(win, text=head, font=("Microsoft YaHei", 10, "bold"),
                  bg=C["card"], fg=C["fg"]).pack(anchor="w", padx=12, pady=(10, 2))
         lb = tk.Listbox(win, bg=C["card"], fg=C["fg"], selectbackground=C["accent"],
                         selectforeground="#fff", font=("Microsoft YaHei", 9), relief="flat")
-        for i, c in enumerate(cands):
+        for c in cands:
             lb.insert("end", f"{c['name']} — {c['artist']}  ({c['dur']//60}:{c['dur']%60:02d})")
-        lb.pack(fill="both", expand=True, padx=12, pady=4)
-        if cands:
+            if saved and c["id"] == saved.get("id"):
+                lb.selection_set(lb.size() - 1)
+        if not lb.curselection() and cands:
             lb.selection_set(0)
+        lb.pack(fill="both", expand=True, padx=12, pady=4)
         def pick():
             sel = lb.curselection()
             if sel:
-                self._apply_lyric(cands[sel[0]])
+                self._apply_lyric(cands[sel[0]], bvid)
                 win.destroy()
         lb.bind("<Double-Button-1>", lambda e: pick())
-        btn = tk.Button(win, text="选定歌词", font=("Microsoft YaHei", 9),
-                        bg=C["accent"], fg="#fff", relief="flat", command=pick)
-        btn.pack(pady=(0, 10))
+        tk.Button(win, text="选定歌词", font=("Microsoft YaHei", 9),
+                  bg=C["accent"], fg="#fff", relief="flat", command=pick).pack(pady=(0, 10))
         self._pick_win = win
 
-    def _apply_lyric(self, cand):
-        """选定候选 → 开歌词窗"""
+    def _apply_lyric(self, cand, bvid=None):
+        """选定候选 → 开歌词窗 + 持久化记录"""
         self._lyric_lines = cand["lines"]
         self._lyric_offset = 0.0
         self._last_lyric = None
         self._show_lyric_win(f"{cand['name']} — {cand['artist']}")
+        if bvid:
+            self._lyric_map[bvid] = {
+                "id": cand["id"], "name": cand["name"],
+                "artist": cand["artist"], "dur": cand["dur"], "offset": 0.0,
+            }
+            _save_lyric_map(self._lyric_map)
+            notify(self.root, f"💾 已记住《{cand['name']}》歌词，下次播放自动加载")
+
+    def _autoload_lyric(self, item):
+        """播放时：这首若已选过歌词版本，自动拉 LRC 并开歌词窗（不弹候选）"""
+        rec = self._lyric_map.get(item.get("bvid", ""))
+        if not rec:
+            return
+        def work():
+            try:
+                lines = _parse_lrc(_fetch_lyric(rec["id"]))
+                if lines:
+                    self.root.after(0, lambda: self._apply_saved_lyric(rec, lines))
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_saved_lyric(self, rec, lines):
+        """应用已存歌词版本"""
+        self._lyric_lines = lines
+        self._lyric_offset = rec.get("offset", 0.0)
+        self._last_lyric = None
+        self._show_lyric_win(f"{rec['name']} — {rec['artist']}")
+        notify(self.root, f"🎤 已加载歌词《{rec['name']}》")
 
     def _show_lyric_win(self, title):
         """歌词窗：当前句大字 + 微调偏移按钮"""
@@ -778,10 +848,13 @@ class MusicApp:
         self._lyric_win = win
 
     def _nudge_lyric(self, delta):
-        """手动微调歌词偏移"""
+        """手动微调歌词偏移（并持久化到这首歌的记录）"""
         self._lyric_offset += delta
         self._last_lyric = None
         self._update_lyric(getattr(self, "_last_pos", 0))
+        if self._cur_bvid and self._cur_bvid in self._lyric_map:
+            self._lyric_map[self._cur_bvid]["offset"] = self._lyric_offset
+            _save_lyric_map(self._lyric_map)
 
     def _close_lyric(self):
         self._lyric_lines = []
