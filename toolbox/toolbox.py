@@ -32,7 +32,9 @@ CELL_W = 140
 CELL_H = 140
 PADDING = 20
 GRID_COLS = 5          # 列数，随窗口宽度自适应
-ROWS_PER_PAGE = 2      # 每页行数（固定）
+ROWS_PER_PAGE = 2      # 每页行数（随窗口高度自适应，初始值）
+ROW_STEP = CELL_H + PADDING   # 动态行距（随画布实际高度重新分配）
+COL_STEP = CELL_W + PADDING   # 动态列距（随画布实际宽度重新分配）
 SETTINGS_FILE = Path.home() / ".config" / "toolbox" / "settings.json"
 
 # 主题色（跟其他工具一致）
@@ -427,6 +429,7 @@ class ToolboxApp:
         """顶部分类筛选栏（全部 / Linux / Wine / 安卓 / 浏览器）"""
         bar = tk.Frame(self.root, bg=C_BG)
         bar.pack(side="top", fill="x", pady=(6, 0))
+        self._filter_bar = bar
         for key, text in ECOSYSTEMS:
             b = tk.Button(
                 bar, text=text, width=8,
@@ -524,29 +527,46 @@ class ToolboxApp:
         start = self._page * GRID_COLS * ROWS_PER_PAGE
         end = min(len(self.items), start + GRID_COLS * ROWS_PER_PAGE)
 
-        canvas_w = GRID_COLS * CELL_W + (GRID_COLS + 1) * PADDING
-        canvas_h = ROWS_PER_PAGE * CELL_H + (ROWS_PER_PAGE + 1) * PADDING
-
         # 销毁旧 canvas
         if hasattr(self, 'canvas'):
             self.canvas.destroy()
 
         self.canvas = tk.Canvas(
             self.root,
-            width=canvas_w,
-            height=canvas_h,
+            width=GRID_COLS * CELL_W,
+            height=ROWS_PER_PAGE * CELL_H,
             bg=C_BG,
             highlightthickness=0,
         )
-        self.canvas.pack(fill="both", expand=True)
+        self.canvas.pack(fill="both")
 
-        # 只画当前页的 items（tag 用全局索引）
+        # 根据窗口实际剩余高度重新分配行距，让 canvas 恰好填满，不留白
+        global ROW_STEP, COL_STEP
+        # winfo 在首次渲染前返回 1，取不到真实值时用估算值兜底
+        bar_h = self._filter_bar.winfo_height() if hasattr(self, '_filter_bar') else 0
+        nav_h = self._nav.winfo_height() if hasattr(self, '_nav') else 0
+        if bar_h <= 1: bar_h = 44
+        if nav_h <= 1: nav_h = 36
+        avail_w = self.root.winfo_width()
+        avail_h = self.root.winfo_height() - bar_h - nav_h
+        if avail_w > 0:
+            COL_STEP = max(CELL_W + PADDING, avail_w // GRID_COLS)
+        else:
+            COL_STEP = CELL_W + PADDING
+        if ROWS_PER_PAGE > 0 and avail_h > 0:
+            ROW_STEP = max(CELL_H + PADDING, avail_h // ROWS_PER_PAGE)
+        else:
+            ROW_STEP = CELL_H + PADDING
+        # canvas 尺寸精确匹配动态步长
+        self.canvas.config(width=GRID_COLS * COL_STEP, height=ROWS_PER_PAGE * ROW_STEP)
+
+        # 只画当前页的 items（tag 用全局索引），y 用动态行距 + 行内垂直居中
         for gidx in range(start, end):
             local = gidx - start
             col = local % GRID_COLS
             row = local // GRID_COLS
-            x = PADDING + col * CELL_W + CELL_W // 2
-            y = PADDING + row * CELL_H + CELL_H // 2
+            x = col * COL_STEP + COL_STEP // 2
+            y = row * ROW_STEP + ROW_STEP // 2
 
             self.draw_cell(self.canvas, self.items[gidx], x, y, gidx)
 
@@ -579,18 +599,26 @@ class ToolboxApp:
         self._resize_pending = self.root.after(120, self._apply_layout)
 
     def _apply_layout(self):
-        """根据当前窗口宽度重算列数并重绘"""
-        global GRID_COLS
+        """根据当前窗口宽高重算列数和行数并重绘"""
+        global GRID_COLS, ROWS_PER_PAGE
         self._resize_pending = None
         if not hasattr(self, "canvas"):
             return
-        avail_w = self.canvas.winfo_width()
-        if avail_w < 60:
-            avail_w = self.root.winfo_width() - 20
-        cols = max(2, (avail_w - PADDING) // CELL_W)
-        if cols != GRID_COLS:
-            GRID_COLS = cols
-            self.draw_grid()
+        # 列数：宽度 / (格子宽 + 间距)，保底 2，上限 12
+        root_w = self.root.winfo_width()
+        cols = max(2, min(12, (root_w - 40) // (CELL_W + PADDING)))
+        # 行数：高度扣掉筛选栏+导航栏后 / (格子高 + 间距)，保底 1，上限 10
+        bar_h = self._filter_bar.winfo_height() if hasattr(self, '_filter_bar') else 0
+        if bar_h <= 1: bar_h = 44
+        nav_h = self._nav.winfo_height() if hasattr(self, '_nav') else 0
+        if nav_h <= 1: nav_h = 36
+        avail_h = self.root.winfo_height() - bar_h - nav_h - 20
+        rows = max(1, min(10, avail_h // (CELL_H + PADDING)))
+
+        GRID_COLS = cols
+        ROWS_PER_PAGE = rows
+        # 任何 resize 都重绘（重绘时会重算 COL_STEP/ROW_STEP 摊满 canvas）
+        self.draw_grid()
 
     def _zoom(self, event):
         """Ctrl+滚轮：缩放格子/图标大小"""
@@ -710,17 +738,17 @@ class ToolboxApp:
         canvas.tag_bind(click_tag, "<Leave>", lambda e, t=f"hl_{grid_idx}": self.on_hover(t, False))
 
     def _cell_center(self, idx):
-        """全局索引 → 当前页内中心坐标"""
+        """全局索引 → 当前页内中心坐标（行列都用动态步长）"""
         start = self._page * GRID_COLS * ROWS_PER_PAGE
         local = idx - start
         col = local % GRID_COLS
         row = local // GRID_COLS
-        return PADDING + col * CELL_W + CELL_W // 2, PADDING + row * CELL_H + CELL_H // 2
+        return col * COL_STEP + COL_STEP // 2, row * ROW_STEP + ROW_STEP // 2
 
     def _idx_at(self, x, y):
         """鼠标坐标 → 全局索引（仅当前页内，页外返回 -1）"""
-        col = (x - PADDING) // CELL_W
-        row = (y - PADDING) // CELL_H
+        col = x // COL_STEP
+        row = y // ROW_STEP   # 行列都用动态步长，与 draw_grid 的 x/y 计算一致
         local = row * GRID_COLS + col
         start = self._page * GRID_COLS * ROWS_PER_PAGE
         end = min(len(self.items), start + GRID_COLS * ROWS_PER_PAGE)
@@ -1028,6 +1056,9 @@ class ToolboxApp:
         # 从列表移除
         idx = self.items.index(item)
         self.items.pop(idx)
+        # 同时从全量列表移除（否则重新扫描/切换筛选会加回来）
+        if item in self._all_items:
+            self._all_items.remove(item)
         self._save_order()   # 同步 + 落盘
         
         # 调整选中索引
