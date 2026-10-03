@@ -1,0 +1,18 @@
+[Desktop Entry]
+Categories=System;Utility;
+Comment[zh_CN]=从 cc-switch 同步 MCP 配置到 pi
+Comment=从 cc-switch 同步 MCP 配置到 pi
+Exec=/home/a1/sh/ccswitch-pi/sync-ccswitch-pi.sh
+GenericName[zh_CN]=cc-switch → pi 同步
+GenericName=cc-switch → pi 同步
+Icon=folder-sync
+MimeType=
+Name[zh_CN]=Pi-MCP同步
+Name=Pi-MCP同步
+Path=
+StartupNotify=true
+Terminal=true
+TerminalOptions=
+Type=Application
+X-KDE-SubstituteUID=false
+X-KDE-Username=

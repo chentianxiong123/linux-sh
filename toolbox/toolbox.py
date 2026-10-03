@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import time
 import tkinter as tk
+from tkinter import messagebox
 from pathlib import Path
 
 try:
@@ -1067,7 +1068,7 @@ class ToolboxApp:
 
     def delete_item(self, item):
         """删除此工具（确认后删文件 + 从网格移除）"""
-        if not tk.messagebox.askyesno(
+        if not messagebox.askyesno(
             "删除工具",
             f"确定删除 [{item['name']}] 吗？\n\n文件: {item['path']}",
         ):
@@ -1127,7 +1128,7 @@ class ToolboxApp:
                     start_new_session=True,     # 新会话（等价 setsid）
                 )
             except Exception as e:
-                tk.messagebox.showerror("启动失败", f"{item['name']}: {e}")
+                messagebox.showerror("启动失败", f"{item['name']}: {e}")
 
 
 if __name__ == "__main__":
