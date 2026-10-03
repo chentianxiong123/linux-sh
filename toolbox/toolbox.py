@@ -426,19 +426,20 @@ class ToolboxApp:
         self._apply_filter()
 
     def _build_filter_bar(self):
-        """顶部分类筛选栏（全部 / Linux / Wine / 安卓 / 浏览器）"""
+        """顶部分类筛选栏（全部 / Linux / Wine / 安卓 / 浏览器）—— 按钮等宽，随窗口拉伸"""
         bar = tk.Frame(self.root, bg=C_BG)
         bar.pack(side="top", fill="x", pady=(6, 0))
         self._filter_bar = bar
-        for key, text in ECOSYSTEMS:
+        for i, (key, text) in enumerate(ECOSYSTEMS):
             b = tk.Button(
-                bar, text=text, width=8,
+                bar, text=text,
                 bg=C_CARD if key != self._filter else C_ACCENT,
                 fg=C_FG, relief="flat", font=("Microsoft YaHei", 10),
                 activebackground=C_ACCENT, activeforeground="#fff",
                 cursor="hand2",
                 command=lambda k=key: self._set_filter(k))
-            b.pack(side="left", padx=3, pady=2)
+            b.grid(row=0, column=i, padx=3, pady=2, sticky="ew")
+            bar.columnconfigure(i, weight=1, uniform="filter")
             self._filter_btns[key] = b
 
     def _set_filter(self, key):
@@ -604,6 +605,12 @@ class ToolboxApp:
         self._resize_pending = None
         if not hasattr(self, "canvas"):
             return
+        # 只在宽高实际变化时才重绘，移动窗口不重绘
+        w, h = self.root.winfo_width(), self.root.winfo_height()
+        if getattr(self, '_last_layout_wh', None) == (w, h):
+            return
+        self._last_layout_wh = (w, h)
+
         # 列数：宽度 / (格子宽 + 间距)，保底 2，上限 12
         root_w = self.root.winfo_width()
         cols = max(2, min(12, (root_w - 40) // (CELL_W + PADDING)))
