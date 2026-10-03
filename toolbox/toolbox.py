@@ -1024,18 +1024,37 @@ class ToolboxApp:
         menu.add_command(label="🗑 删除此工具", command=lambda: self.delete_item(item))
         
         self._active_menu = menu
-        # post 模式（无 grab），配合 root 的 Button-1/FocusOut 关闭
+        
+        # menu post will steal focus -> root FocusOut -> menu unposted immediately
+        # so unbind root Button-1/FocusOut before posting, restore after menu closes
+        self.root.bind("<Button-1>", None)
+        self.root.bind("<FocusOut>", None)
+        
+        # restore bindings when menu is closed (unmapped)
+        def _on_menu_closed(_e):
+            self._restore_root_bindings()
+        menu.bind("<Unmap>", _on_menu_closed)
+        
         menu.post(event.x_root, event.y_root)
 
     def _close_menu(self):
-        """关闭当前打开的右键菜单 + 完整名字提示"""
+        """close active menu + name tip"""
         if self._active_menu:
             try:
                 self._active_menu.unpost()
             except Exception:
                 pass
             self._active_menu = None
+            self._restore_root_bindings()
         self._close_name_tip()
+
+    def _restore_root_bindings(self):
+        """restore root Button-1/FocusOut bindings"""
+        try:
+            self.root.bind("<Button-1>", lambda e: self._close_menu())
+            self.root.bind("<FocusOut>", lambda e: self._close_menu())
+        except Exception:
+            pass
 
     def copy_path(self, item):
         """复制 .desktop 文件路径到剪贴板"""
